@@ -1,0 +1,21 @@
+powershot:
+  image: node:24
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    GIT_DEPTH: "0"
+  before_script:
+    - npm install --global --ignore-scripts @0xcraft/powershot@1.0.0
+  script:
+    - |
+      STATUS=0
+      psh review --verify-only \
+        --from "$CI_MERGE_REQUEST_DIFF_BASE_SHA" \
+        --to "$CI_COMMIT_SHA" \
+        --format codequality > gl-code-quality-report.json || STATUS=$?
+      test "$STATUS" -le 1 || exit "$STATUS"
+      test "$STATUS" -eq 0
+  artifacts:
+    when: always
+    reports:
+      codequality: gl-code-quality-report.json

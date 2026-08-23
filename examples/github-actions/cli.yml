@@ -1,0 +1,43 @@
+name: PowerShot CLI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Install PowerShot
+        run: npm install --global --ignore-scripts @0xcraft/powershot@1.0.0
+
+      - name: Review pull request
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: |
+          STATUS=0
+          psh review --verify-only \
+            --from "$BASE" --to HEAD \
+            --report markdown=powershot.md \
+            --report sarif=powershot.sarif \
+            --format compact || STATUS=$?
+          if [ -f powershot.md ]; then
+            cat powershot.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "PowerShot produced no Markdown report. Exit: $STATUS." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          case "$STATUS" in
+            0) exit 0 ;;
+            1) exit 1 ;;
+            *) exit "$STATUS" ;;
+          esac

@@ -1,0 +1,23 @@
+# Deterministic checks on every merge request: no API key, no tokens spent.
+# Findings render inside the MR through GitLab's own Code Quality report.
+powershot:
+  stage: test
+  image: node:20
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - npm ci && npm run build
+    - >
+      node dist/cli.js review
+      --verify-only
+      --from "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --to HEAD
+      --format codequality > gl-code-quality-report.json || true
+    - >
+      node dist/cli.js review
+      --verify-only
+      --from "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --to HEAD
+      --format markdown || true
+  artifacts:
+    reports:
+      codequality: gl-code-quality-report.json
+    expire_in: 1 week

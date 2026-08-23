@@ -1,0 +1,8 @@
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-5",
+  "verifiers": { "enable": ["*"] },
+  "judges": { "enable": ["plausible-logic"] },
+  "minSeverity": "low",
+  "ignore": ["**/node_modules/**", "**/dist/**", "**/*.generated.*"]
+}

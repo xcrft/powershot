@@ -1,0 +1,65 @@
+{
+  "name": "@0xcraft/powershot",
+  "version": "1.0.0",
+  "description": "Oracle-first code review for machine-written code, with deterministic verification and CI-ready reports.",
+  "license": "Apache-2.0",
+  "author": "aglumova <alina.glumova@gmail.com>",
+  "keywords": [
+    "ai",
+    "ci",
+    "cli",
+    "code-review",
+    "developer-tools",
+    "github-actions",
+    "static-analysis",
+    "typescript"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xcrft/powershot.git"
+  },
+  "homepage": "https://github.com/xcrft/powershot#readme",
+  "bugs": {
+    "url": "https://github.com/xcrft/powershot/issues"
+  },
+  "type": "module",
+  "imports": {
+    "#app/*.js": "./dist/*.js"
+  },
+  "bin": {
+    "powershot": "dist/cli.js",
+    "psh": "dist/cli.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "dist/**/*.js",
+    "docs/**/*.md",
+    "docs/assets/*",
+    "examples/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "npm run build && node dist/selftest.js && node dist/langtest.js",
+    "psh": "npm run build && node dist/cli.js",
+    "prepack": "npm run clean && npm run build && npm test",
+    "smoke": "node dist/package-smoke.js"
+  },
+  "dependencies": {
+    "ts-morph": "^23.0.0",
+    "web-tree-sitter": "0.22.6",
+    "tree-sitter-wasms": "0.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}

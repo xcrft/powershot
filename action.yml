@@ -1,0 +1,169 @@
+name: PowerShot
+description: Review a pull request for the failure modes of machine-written code
+author: 0xcraft
+
+branding:
+  icon: crosshair
+  color: red
+
+inputs:
+  verify-only:
+    description: Deterministic checks only — no model, no tokens, no API key
+    default: 'true'
+  anthropic-api-key:
+    description: Set to also run the judges. Leave empty to stay deterministic.
+    default: ''
+  min-severity:
+    description: info | low | medium | high | critical
+    default: 'low'
+  checks:
+    description: Comma-separated check names, or empty for the configured set
+    default: ''
+  comment:
+    description: Post the review as a pull request comment
+    default: 'true'
+  fail-on-findings:
+    description: Fail the job when anything is reported
+    default: 'false'
+  approve:
+    description: >
+      Approve the pull request when the review is clean. Off by default on purpose:
+      an approval is a human signal, and a tool that grants one silently is a tool
+      that can wave through what it was never able to look at.
+    default: 'false'
+
+outputs:
+  findings:
+    description: How many findings were reported
+    value: ${{ steps.review.outputs.findings }}
+  complete:
+    description: true only when the review reached a complete verdict
+    value: ${{ steps.review.outputs.complete }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: '24'
+
+    # Built from the ref the workflow pinned, rather than installed from a registry.
+    # `uses: xcrft/powershot@v1` already names a version; resolving a second one from
+    # npm would mean a workflow that pinned the action still ran code it never pinned.
+    - name: Build PowerShot
+      shell: bash
+      # dev dependencies included: the build is TypeScript, so tsc has to be here.
+      # install scripts are off — nothing in the tree needs one, and CI is not the
+      # place to run arbitrary code from a transitive dependency.
+      run: npm ci --ignore-scripts && npm run build
+      working-directory: ${{ github.action_path }}
+
+    - name: Restore judge answers
+      if: inputs.verify-only != 'true'
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: ${{ runner.temp }}/powershot-cache
+        # Each run writes a fresh immutable cache and restores the newest answer set
+        # for this pull request or branch. A fixed key would restore forever but never
+        # save answers learned by later pushes.
+        key: powershot-judge-${{ runner.os }}-${{ github.repository_id }}-${{ github.event.pull_request.number || github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          powershot-judge-${{ runner.os }}-${{ github.repository_id }}-${{ github.event.pull_request.number || github.ref_name }}-
+
+    - name: Review
+      id: review
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        PSH: ${{ github.action_path }}/dist/cli.js
+        VERIFY_ONLY: ${{ inputs.verify-only }}
+        MIN_SEVERITY: ${{ inputs.min-severity }}
+        CHECKS: ${{ inputs.checks }}
+        BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+        POWERSHOT_CACHE_DIR: ${{ runner.temp }}/powershot-cache
+      run: |
+        set -o pipefail
+        # inputs arrive as environment variables rather than expanded into the script,
+        # so a branch or check name cannot become part of the command that runs
+        ARGS=(--from "origin/$BASE_REF" --to HEAD --min-severity "$MIN_SEVERITY")
+        [ "$VERIFY_ONLY" = "true" ] && ARGS+=(--verify-only)
+        [ -n "$CHECKS" ] && ARGS+=(--checks "$CHECKS")
+
+        # One review, every report. Three separate runs produced three verdicts that a
+        # judge in the loop does not have to make agree, and the step then picked one.
+        # `set -e` is on for every Actions step, so the status is captured on the
+        # failure branch — `CMD; STATUS=$?` ends the step before it assigns.
+        STATUS=0
+        node "$PSH" review "${ARGS[@]}" \
+          --report sarif=powershot.sarif \
+          --report markdown=powershot.md \
+          --report json=powershot.json > /dev/null || STATUS=$?
+
+        # Only 0 (clean) and 1 (findings) are verdicts. 3 is an incomplete review,
+        # 2 is bad usage and 130 is an interrupt — none of the three looked at the
+        # whole change, and treating them as complete is how a half-run approves.
+        case "$STATUS" in
+          0|1) COMPLETE=true ;;
+          *)   COMPLETE=false; echo "::error::PowerShot exited $STATUS — the review is not a verdict" ;;
+        esac
+
+        # read as a file: `require` refuses a .sarif extension and would report zero
+        COUNT=$(node -e 'const fs=require("fs");try{const s=JSON.parse(fs.readFileSync("powershot.sarif","utf8"));console.log(s.runs[0].results.length)}catch{console.log("unknown")}')
+        if [ "$COUNT" = "unknown" ]; then
+          echo "::error::PowerShot produced no readable report"
+          COUNT=0; COMPLETE=false
+        fi
+        echo "findings=$COUNT" >> "$GITHUB_OUTPUT"
+        echo "complete=$COMPLETE" >> "$GITHUB_OUTPUT"
+        if [ -f powershot.md ]; then
+          cat powershot.md >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "PowerShot produced no markdown report. Exit: $STATUS." >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: Fail when the review is not a verdict
+      # An incomplete run outranks its findings. Without this the job stayed green on
+      # exit 3 with nothing to report, which is the exact shape of a false clean.
+      if: steps.review.outputs.complete != 'true'
+      shell: bash
+      run: |
+        echo "::error::PowerShot could not complete this review — see the run manifest"
+        exit 1
+
+    - name: Upload SARIF
+      if: always() && steps.review.outputs.complete == 'true' && hashFiles('powershot.sarif') != ''
+      uses: github/codeql-action/upload-sarif@6d786de4d6f3531a740e445b53a42b622bbbace8 # v3
+      with:
+        sarif_file: powershot.sarif
+        category: powershot
+
+    - name: Comment on the pull request
+      # always, so an incomplete review is still explained — the body says so itself
+      if: always() && inputs.comment == 'true' && github.event_name == 'pull_request' && hashFiles('powershot.md') != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR: ${{ github.event.number }}
+      run: |
+        # one comment per PR, edited in place, so a busy PR does not fill with reruns
+        gh pr comment "$PR" --body-file powershot.md --edit-last --create-if-none || \
+          gh pr comment "$PR" --body-file powershot.md
+
+    - name: Approve a clean review
+      # only on a completed, genuinely empty review — an incomplete run must never
+      # approve, since "we found nothing" and "we could not look" are different
+      if: inputs.approve == 'true' && github.event_name == 'pull_request' && steps.review.outputs.findings == '0' && steps.review.outputs.complete == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR: ${{ github.event.number }}
+      run: gh pr review "$PR" --approve --body "PowerShot found nothing."
+
+    - name: Fail when findings were reported
+      if: inputs.fail-on-findings == 'true' && steps.review.outputs.findings != '0'
+      shell: bash
+      env:
+        COUNT: ${{ steps.review.outputs.findings }}
+      run: |
+        echo "::error::PowerShot reported $COUNT finding(s)"
+        exit 1

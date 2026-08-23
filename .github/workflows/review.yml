@@ -1,0 +1,86 @@
+name: PowerShot review
+
+# The workflow definition and reviewer come from the protected base revision. The
+# pull request is checked out only as data and none of its scripts are executed.
+on: [pull_request_target]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the trusted reviewer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: reviewer
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: reviewer/package-lock.json
+
+      - name: Build the trusted reviewer
+        working-directory: reviewer
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+
+      - name: Check out the untrusted review target
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+
+      - name: Ensure the base commit is available to the target repository
+        working-directory: target
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
+
+      - name: Review the diff once
+        id: review
+        working-directory: target
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PSH: ${{ github.workspace }}/reviewer/dist/cli.js
+          REPORT_ROOT: ${{ github.workspace }}
+        run: |
+          STATUS=0
+          node "$PSH" review --verify-only --from "$BASE_SHA" --to "$HEAD_SHA" \
+            --report sarif="$REPORT_ROOT/powershot.sarif" \
+            --report markdown="$REPORT_ROOT/powershot.md" > /dev/null || STATUS=$?
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          if [ -f "$REPORT_ROOT/powershot.md" ]; then
+            cat "$REPORT_ROOT/powershot.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "PowerShot produced no markdown report. Exit: $STATUS." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: github/codeql-action/upload-sarif@6d786de4d6f3531a740e445b53a42b622bbbace8 # v3
+        if: >-
+          always() &&
+          (steps.review.outputs.status == '0' || steps.review.outputs.status == '1') &&
+          hashFiles('powershot.sarif') != ''
+        with:
+          sarif_file: powershot.sarif
+          category: powershot
+
+      - name: Fail when the review is incomplete
+        if: always() && steps.review.outputs.status != '0' && steps.review.outputs.status != '1'
+        shell: bash
+        env:
+          STATUS: ${{ steps.review.outputs.status }}
+        run: |
+          echo "::error::PowerShot exited $STATUS — the review is not a verdict"
+          exit 1
