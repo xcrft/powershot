@@ -3,6 +3,7 @@ import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs
 import { join } from 'node:path'
 import type { Usage } from './budget.js'
 import type { PlanItem } from './plan.js'
+import type { Severity } from './types.js'
 
 export const SCHEMA = 'powershot.run/v1' as const
 
@@ -29,7 +30,15 @@ export type RunManifestV1 = {
   target: { requested: Record<string, string | undefined>; base?: string; head?: string }
   /** which policy judged this run, and its exact bytes */
   policy: { source: 'base' | 'head' | 'default'; ref?: string; hash: string }
-  engine: { version: string; provider?: string; model?: string; tools: boolean; verifyOnly: boolean }
+  engine: {
+    version: string
+    provider?: string
+    model?: string
+    tools: boolean
+    verifyOnly: boolean
+    /** Effective reporting threshold after config and CLI overrides. */
+    minSeverity?: Severity
+  }
   files: PlanItem[]
   units: UnitRecord[]
   checks: {
@@ -61,34 +70,6 @@ export type CompletionParts = {
   failures: string[]
   cancelled?: boolean
   budgetStop?: string
-}
-
-type CoverageRecord = {
-  coverage?: 'full' | 'portable'
-  files?: { path: string; unavailable?: string[] }[]
-  checks?: { unavailable?: { check: string; missing: string }[] }
-}
-
-/** Human-readable optional depth, kept separate from verdict-blocking notLookedAt. */
-export function unavailableCoverage(record: CoverageRecord): string[] {
-  const out: string[] = []
-  const files = (record.files ?? []).filter((file) => file.unavailable?.length)
-  if (files.length > 0) {
-    out.push(
-      files.length + ' file(s) without enriched semantic coverage: ' +
-      files.slice(0, 5).map((file) => file.path + ' (' + file.unavailable!.join(', ') + ')').join(', ') +
-      (files.length > 5 ? ', …' : ''),
-    )
-  }
-  const checks = record.checks?.unavailable ?? []
-  if (checks.length > 0) {
-    out.push(
-      checks.length + ' enriched check(s) unavailable: ' +
-      checks.slice(0, 8).map((check) => check.check + ' (no ' + check.missing + ')').join(', ') +
-      (checks.length > 8 ? ', …' : ''),
-    )
-  }
-  return out
 }
 
 /** The single state machine behind manifests, benches, renderers and exit codes. */

@@ -1,5 +1,10 @@
 import type { Finding } from '#app/types.js'
-import { unavailableCoverage } from '#app/manifest.js'
+import {
+  modeNote,
+  noFindingsLabel,
+  scopeLine,
+  type ReviewSummary,
+} from './summary.js'
 
 const MARK: Record<string, string> = { verified: '▣', judged: '▚' }
 
@@ -60,13 +65,34 @@ function group(findings: Finding[]): Map<string, Finding[]> {
   return out
 }
 
-export function markdown(findings: Finding[], run?: {
-  state: string
-  notLookedAt: string[]
-  coverage?: 'full' | 'portable'
-  files?: { path: string; unavailable?: string[] }[]
-  checks?: { unavailable?: { check: string; missing: string }[] }
-}): string {
+function runSummary(run: ReviewSummary): string[] {
+  const out: string[] = []
+  const scope = scopeLine(run)
+  const mode = modeNote(run, '`verify-only`')
+  const details = run.state === 'complete'
+    ? run.scopeDetails ?? []
+    : [...run.notLookedAt, ...(run.scopeDetails ?? [])]
+  if (scope) out.push(scope, '')
+  if (mode) out.push(mode, '')
+  if (details.length > 0) {
+    out.push(
+      '<details>',
+      '<summary>' +
+        (run.state !== 'complete'
+          ? 'Why this is not a verdict'
+          : run.coverage === 'portable' ? 'Coverage details' : 'Review scope') +
+        '</summary>',
+      '',
+      ...details.map((detail) => '- ' + text(detail)),
+      '',
+      '</details>',
+      '',
+    )
+  }
+  return out
+}
+
+export function markdown(findings: Finding[], run?: ReviewSummary): string {
   // "No findings" from a run that could not look is the one thing this must never
   // say on its own — the reader takes a comment at face value, and a red job beside
   // a green comment is read as a flaky job
@@ -74,36 +100,28 @@ export function markdown(findings: Finding[], run?: {
   const banner = incomplete
     ? [
         '> [!WARNING]',
-        '> **This review is ' + text(run!.state) + ' — not a verdict.** Something was not looked at:',
-        ...run!.notLookedAt.slice(0, 8).map((f) => '> - ' + text(f)),
+        '> **This review is ' + text(run!.state) + ' — not a verdict.** Some files or checks were not reviewed.',
         '',
       ]
     : []
-  const portable = run?.state === 'complete' && run.coverage === 'portable'
-  const coverage = portable
-    ? [
-        '> [!NOTE]',
-        '> **Portable coverage.** Self-contained oracles ran; enriched semantic depth was unavailable:',
-        ...unavailableCoverage(run).map((reason) => '> - ' + text(reason)),
-        '',
-      ]
-    : []
+  const summary = run ? runSummary(run) : []
 
   if (findings.length === 0) {
     return [
-      '## PowerShot', '', ...banner, ...coverage,
+      '## PowerShot', '', ...banner,
       incomplete
         ? 'No findings *from what it managed to review*.'
-        : portable ? 'No findings in portable coverage.' : 'No findings.',
-      '',
+        : run ? '✅ **' + noFindingsLabel(run) + '**' : 'No findings.',
+      '', ...summary,
     ].join('\n')
   }
 
   const verified = findings.filter((f) => f.class === 'verified').length
   const judged = findings.length - verified
 
-  const out: string[] = ['## PowerShot', '', ...banner, ...coverage]
+  const out: string[] = ['## PowerShot', '', ...banner]
   out.push('**' + verified + ' verified** (deterministic, 0 tokens) · **' + judged + ' judged** (agent)', '')
+  out.push(...summary)
 
   for (const [file, list] of group(findings)) {
     out.push('### `' + path(file) + '`', '')
