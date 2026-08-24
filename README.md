@@ -20,13 +20,14 @@ PowerShot reviews the failure modes that plausible-looking generated code tends 
 hide: invented APIs, undeclared dependencies, dropped guards, swallowed errors,
 tests that prove nothing, bent expectations, stale callers, and duplicated helpers.
 
-It asks compilers, parsers, manifests, reference graphs, and pre/post ASTs first.
-Optional model judges only handle questions that still require judgement.
+It asks self-contained parsers, manifests, and pre/post ASTs first, then uses compiler
+types and reference graphs when the environment can supply them. Optional model judges
+only handle questions that still require judgement.
 
 <table>
   <tr>
     <td width="33%"><strong>Deterministic first</strong><br>Local checks need no model, key, tokens, or network calls.</td>
-    <td width="33%"><strong>Honest completion</strong><br>A partial run cannot present itself as a clean verdict.</td>
+    <td width="33%"><strong>Honest coverage</strong><br>Portable, full, partial, and failed runs stay distinguishable.</td>
     <td width="33%"><strong>CI-native output</strong><br>One run emits terminal, Markdown, JSON, SARIF, manifest, and Code Quality reports.</td>
   </tr>
 </table>
@@ -89,7 +90,7 @@ flowchart LR
 
 1. **Snapshot** resolves the exact tree the review is about.
 2. **Ground** builds the available type, syntax, dependency, and reference oracles.
-3. **Plan** assigns checks and missing capabilities to each file individually.
+3. **Plan** assigns baseline checks and enriched semantic capabilities to each file individually.
 4. **Verify** runs deterministic checks and records what actually executed.
 5. **Judge** optionally reviews bounded bundles of related files.
 6. **Manifest** decides whether the result is complete, partial, or failed.
@@ -108,8 +109,11 @@ Every finding says where it came from:
 | `verified` | `firm` | A deterministic heuristic fired; inspect the evidence |
 | `judged` | `firm` or `tentative` | A model supplied the judgement and provenance |
 
-PowerShot stays silent when a required oracle is unavailable. The missing capability
-is written to the manifest instead of being counted as a pass.
+Portable coverage is the default: self-contained oracles run without bootstrapping the
+reviewed repository, while unavailable compiler/reference depth stays visible in the
+manifest and reports. Set `"coverage": "strict"`, or explicitly select a check with
+`--checks`, when a missing semantic oracle must make the run partial. An unavailable
+oracle is never counted as a pass in either profile.
 
 ## Deterministic checks
 
@@ -174,33 +178,38 @@ commands.
 
 ```mermaid
 flowchart LR
-    START["Selected files and checks"] --> ACCOUNT{"Everything accounted for?"}
-    ACCOUNT -- "yes" --> FINDINGS{"Findings?"}
+    START["Selected files and checks"] --> ACCOUNT{"Required work accounted for?"}
+    ACCOUNT -- "yes" --> DEPTH{"Enriched semantic depth available?"}
+    DEPTH -- "yes" --> FULL["full coverage"]
+    DEPTH -- "no · portable policy" --> PORTABLE["portable coverage · gaps named"]
+    FULL --> FINDINGS{"Findings?"}
+    PORTABLE --> FINDINGS
     FINDINGS -- "no" --> CLEAN["exit 0 · complete and clean"]
     FINDINGS -- "yes" --> FOUND["exit 1 · complete with findings"]
-    ACCOUNT -- "capability or budget gap" --> PARTIAL["exit 3 · partial"]
+    ACCOUNT -- "required oracle or budget gap" --> PARTIAL["exit 3 · partial"]
     ACCOUNT -- "required stage failed" --> FAILED["exit 3 · failed"]
 
     classDef neutral fill:#172033,stroke:#57a6ff,color:#f0f6fc,stroke-width:2px
     classDef good fill:#17251f,stroke:#4ac58b,color:#f0f6fc,stroke-width:2px
     classDef warn fill:#2a2117,stroke:#f2b84b,color:#f0f6fc,stroke-width:2px
     classDef bad fill:#2a191b,stroke:#ff675c,color:#f0f6fc,stroke-width:2px
-    class START,ACCOUNT,FINDINGS neutral
+    class START,ACCOUNT,DEPTH,FINDINGS neutral
     class CLEAN good
-    class FOUND,PARTIAL warn
+    class FULL,PORTABLE,FOUND,PARTIAL warn
     class FAILED bad
 ```
 
 | Exit | Contract |
 |---:|---|
-| `0` | Review completed and found nothing at the selected severity |
-| `1` | Review completed and reported findings |
+| `0` | Review completed in full or portable coverage and found nothing at the selected severity |
+| `1` | Review completed in full or portable coverage and reported findings |
 | `2` | Command or Git input was invalid |
 | `3` | Review is incomplete; findings may be missing |
 
-“No findings” and “PowerShot could not look” are intentionally different pipeline
-outcomes. Use `--format manifest` to inspect file dispositions, executed checks,
-skips, failures, judge units, and `notLookedAt`.
+“No findings in portable coverage”, “No findings”, and “PowerShot could not look” are
+intentionally different outcomes. Use `--format manifest` to inspect `coverage`, file
+dispositions, executed and unavailable checks, failures, judge units, and
+`notLookedAt`.
 
 ## CI integration
 
@@ -211,8 +220,6 @@ The composite action is the shortest setup for GitHub:
   with:
     fetch-depth: 0
 
-- run: npm ci --ignore-scripts
-
 - uses: xcrft/powershot@v1
   with:
     verify-only: 'true'
@@ -222,11 +229,11 @@ The composite action is the shortest setup for GitHub:
     fail-on-findings: 'true'
 ```
 
-Install the checked-out project's dependencies before PowerShot so TypeScript can
-resolve its declared ambient types. The example disables lifecycle scripts because
-pull-request code is untrusted; use the equivalent safe install for another package
-manager. In a monorepo, install from the workspace root or add safe install steps for
-the affected package roots.
+The default portable profile needs no install from the checked-out repository. That is
+the safe default for private monorepos and fork pull requests: do not expose a package
+registry credential merely to enrich a review of untrusted code. If a trusted job
+already has dependencies, PowerShot uses their TypeScript declarations automatically.
+Set `"coverage": "strict"` when missing compiler/reference oracles must block instead.
 
 PowerShot discovers `tsconfig.json` and `tsconfig.*.json` along the ancestor chain of
 each changed file. One review can use several independent package projects, skip
@@ -266,6 +273,7 @@ Anthropic, OpenAI, and Gemini providers are supported.
   "judges": {
     "enable": ["plausible-logic", "test-adequacy", "intent"]
   },
+  "coverage": "portable",
   "minSeverity": "low",
   "ignore": ["**/generated/**"],
   "promptCache": true
@@ -300,8 +308,11 @@ psh review --verify-only --absorb /tmp/powershot-findings.json
 | C | Syntax-backed checks that do not require exception semantics |
 | Solidity | Declared syntax-backed checks |
 
-PowerShot loads a bounded number of grammars per run. Unsupported or unavailable
-coverage is named in the manifest.
+Every declared language is parsed in disposable, language-isolated workers. Sources
+are sent in bounded batches, so a mixed-language monorepo does not accumulate every
+compiled WASM grammar in one process. If a declared parser cannot run, the review
+fails loudly; it is never silently waived. All eleven packs plus TypeScript and
+JavaScript are exercised together by the integration suite.
 
 ## Project guide
 

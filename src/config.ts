@@ -10,6 +10,8 @@ export type Config = {
   judges: string[]
   minSeverity: Severity
   ignore: string[]
+  /** Portable runs use self-contained oracles; strict runs require enriched semantic oracles too. */
+  coverage: 'portable' | 'strict'
   /** mark the system prompt and tools cacheable (Anthropic); set false to opt out */
   promptCache: boolean
 }
@@ -21,6 +23,7 @@ const DEFAULTS: Config = {
   // security may duplicate SAST; convention needs repository idioms in the diff
   judges: ['plausible-logic', 'test-adequacy', 'intent'],
   minSeverity: 'low',
+  coverage: 'portable',
   // findings in vendored trees are not decisions made by this repository
   ignore: [
     '**/node_modules/**', '**/dist/**', '**/build/**', '**/*.generated.*', '**/*.min.js',
@@ -48,6 +51,7 @@ export function policyChanged(root: string, baseRef: string): boolean {
 
 const KEYS = new Set([...Object.keys(DEFAULTS), 'checks'])
 const PROVIDERS = new Set(['anthropic', 'openai', 'gemini'])
+const COVERAGE = new Set(['portable', 'strict'])
 
 /** A misspelled name in the config is the quietest way to get a clean review. */
 export function validateConfig(raw: Record<string, unknown>, known: { verifiers: string[]; judges: string[] }): string[] {
@@ -65,6 +69,9 @@ export function validateConfig(raw: Record<string, unknown>, known: { verifiers:
   }
   if (raw.minSeverity !== undefined && !SEVERITIES.includes(raw.minSeverity as Severity)) {
     problems.push('minSeverity "' + String(raw.minSeverity) + '" is not one of: ' + SEVERITIES.join(', '))
+  }
+  if (raw.coverage !== undefined && !COVERAGE.has(String(raw.coverage))) {
+    problems.push('coverage "' + String(raw.coverage) + '" is not one of: ' + [...COVERAGE].join(', '))
   }
   for (const [field, names] of [['verifiers', known.verifiers], ['judges', known.judges]] as const) {
     const value = (raw as Record<string, any>)[field]

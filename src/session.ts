@@ -41,6 +41,8 @@ type Stored = {
     judged: number
     state?: 'complete' | 'partial' | 'failed'
     notLookedAt?: string[]
+    coverage?: 'full' | 'portable'
+    unavailableCoverage?: string[]
   }
 }
 
@@ -125,7 +127,12 @@ export class Session {
 
   saveReport(
     findings: Finding[],
-    verdict: { state: 'complete' | 'partial' | 'failed'; notLookedAt: string[] },
+    verdict: {
+      state: 'complete' | 'partial' | 'failed'
+      notLookedAt: string[]
+      coverage?: 'full' | 'portable'
+      unavailableCoverage?: string[]
+    },
   ): void {
     this.data.report = {
       findings,
@@ -133,6 +140,8 @@ export class Session {
       judged: findings.filter((f) => f.class === 'judged').length,
       state: verdict.state,
       notLookedAt: verdict.notLookedAt,
+      coverage: verdict.coverage,
+      unavailableCoverage: verdict.unavailableCoverage,
     }
     this.save()
   }

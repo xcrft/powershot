@@ -64,7 +64,7 @@ engine. The engine does not depend on a workflow provider or terminal layout.
 | `src/manifest.ts` | Completion state and the authoritative run record | Rendering |
 | `src/verifiers/` | Deterministic check implementations | Model calls |
 | `src/judges/` | Prompt data, bounded model loop, tool adapter | Git target selection |
-| `src/lang/` | Language-pack data and optional language oracles | Cross-run policy |
+| `src/lang/` | Language-pack data, isolated parser workers, optional language oracles | Cross-run policy |
 | `src/report/` | Pure output adapters | Re-running or reinterpreting a review |
 | `src/bench.ts` | Historical and labelled evaluation | Production command dispatch |
 | `src/session.ts`, `src/cache.ts` | Reuse of completed judge work | Completion decisions |
@@ -107,7 +107,7 @@ sequenceDiagram
       Plan->>Judge: bounded related-file bundles
       Judge-->>Manifest: judged findings + usage
     end
-    Manifest->>Manifest: compute complete / partial / failed
+    Manifest->>Manifest: compute full or portable completion / partial / failed
     Manifest->>Report: one result, many formats
     Report-->>User: terminal, Markdown, SARIF, JSON
 ```
@@ -126,6 +126,12 @@ A run can contain a typed TypeScript file beside a Python file or a TypeScript f
 excluded from `tsconfig`. Capabilities therefore live on each selected file. A checker
 available somewhere in the run is not evidence that it inspected every file.
 
+The policy decides what an absent capability means. Under default `portable` coverage,
+self-contained syntax and manifest oracles remain a complete verdict while unavailable
+`types`, `references`, and `python-types` are recorded as optional depth. Under
+`strict` coverage, or when a check is named explicitly, the same gap is required and
+makes the review partial.
+
 ### Monorepo grounding follows the change
 
 For each changed TypeScript or JavaScript file, grounding inspects only its ancestor
@@ -140,21 +146,40 @@ exists, only changed files are parsed and type-dependent capabilities remain abs
 That keeps a configless or mixed-language monorepo proportional to the review rather
 than to the repository.
 
+Python dependency grounding follows the same rule. Local modules are discovered from
+direct entries on each changed file's ancestor chain and conventional `src`, `lib`, or
+`python` roots. It never recursively crawls an unrelated monorepo tree.
+
+### Grammar memory is isolated by language
+
+Tree-sitter WASM compilation outlives its JavaScript parser objects. Keeping every
+declared grammar in one process pushed measured RSS past 690MB. Production parsing
+therefore groups changed files by language, sends at most 128 files or 8MB of source to
+one disposable worker, hydrates plain AST data in the parent, and terminates the worker.
+Compiled-grammar memory is bounded by one language batch rather than by the
+repository's language count; hydrated AST data remains proportional to the selected
+diff, not the whole repository. A parser failure for a declared language fails
+selection instead of quietly waiving the file.
+
 ### The manifest owns completion
 
 Findings alone cannot distinguish a clean review from an interrupted or unsupported
-one. `RunManifest` accounts for selected files, executed checks, judge units, failures,
-limits, and skips. Renderers and the CLI consume that state instead of deriving their
-own verdict.
+one. `RunManifest` accounts for selected files, executed and unavailable checks, judge
+units, failures, limits, and skips. `state` answers whether required work completed;
+`coverage` separately says `full` or `portable`. Renderers and the CLI consume that
+record instead of deriving their own verdict.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Selected
-    Selected --> Complete: every file and unit accounted for
-    Selected --> Partial: capability, budget, or cancellation gap
+    Selected --> Full: every file, unit, and enriched oracle accounted for
+    Selected --> Portable: required work complete; enriched gaps named
+    Selected --> Partial: required oracle, budget, or cancellation gap
     Selected --> Failed: required stage or file failed
-    Complete --> Exit0: no findings
-    Complete --> Exit1: findings
+    Full --> Exit0: no findings
+    Full --> Exit1: findings
+    Portable --> Exit0: no findings
+    Portable --> Exit1: findings
     Partial --> Exit3
     Failed --> Exit3
 ```
@@ -178,8 +203,9 @@ and duplicated runs waste both time and tokens.
 ### Add a language pack
 
 Add grammar data and conventions in `src/lang/packs.ts`, then add a dedicated fixture
-to `src/langtest.ts`. Language packs run in separate processes so all grammars remain
-covered without sharing one unbounded WASM heap.
+to `src/langtest.ts` and include it in the all-languages review regression. Development
+fixtures and production parsing both isolate grammars by process, so no supported pack
+shares one unbounded WASM heap with the rest.
 
 ### Add a report format
 

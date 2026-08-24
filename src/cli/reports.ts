@@ -1,5 +1,5 @@
 import { writeFileSync } from 'node:fs'
-import type { RunManifestV1 } from '#app/manifest.js'
+import { unavailableCoverage, type RunManifestV1 } from '#app/manifest.js'
 import type { ReviewResult } from '#app/review.js'
 import { dim } from '#app/report/ansi.js'
 import { codeQuality } from '#app/report/codequality.js'
@@ -50,6 +50,8 @@ export function renderReport(
     ...result.stats,
     state: manifest.state,
     notLookedAt: manifest.notLookedAt,
+    coverage: manifest.coverage,
+    unavailableCoverage: unavailableCoverage(manifest),
   })
 }
 

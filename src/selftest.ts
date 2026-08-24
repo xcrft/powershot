@@ -32,13 +32,13 @@ import { ProviderError, redact } from './judges/llm.js'
 import { VERIFIERS } from './verifiers/index.js'
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, symlinkSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { runTool } from './judges/tools.js'
 import { codeQuality } from './report/codequality.js'
 import { viewer } from './report/viewer.js'
 import { absorbDelegated, delegateBrief } from './delegate.js'
 import { TARGETS, findTarget } from './agents.js'
-import { packFor } from './lang/packs.js'
+import { PACKS, packFor, parseIsolated } from './lang/packs.js'
 import { isPhantom, pythonManifest, localModules } from './lang/python-deps.js'
 import { isPhantomGem, rubyManifest } from './lang/ruby-deps.js'
 import { pyrightAvailable } from './lang/pyright.js'
@@ -470,6 +470,34 @@ check('files are routed to the right language pack', () => {
   assert.equal(packFor('src/a.ts'), undefined) // TypeScript keeps its own oracle
   assert.equal(packFor('README.md'), undefined)
 })
+await checkAsync('isolated trees preserve Unicode offsets and grammar fields', async () => {
+  const pack = PACKS.find((candidate) => candidate.name === 'python')!
+  const source = 'label = "é"\ndef answer(value: str) -> str:\n    return value\n'
+  const [tree] = await parseIsolated(pack, [source])
+  assert.ok(tree)
+  const signature = pack.signatures?.(tree.rootNode).get('answer')
+  assert.ok(signature)
+  assert.equal(signature.node.text, 'def answer(value: str) -> str:\n    return value')
+  assert.deepEqual(signature.params, ['value: str'])
+})
+await checkAsync('language worker batching preserves every file past the 128-file boundary', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-foreign-batches-')))
+  try {
+    const changes: ChangedFile[] = []
+    for (let index = 0; index < 129; index++) {
+      const path = 'python/module_' + index + '.py'
+      mkdirSync(dirname(join(dir, path)), { recursive: true })
+      writeFileSync(join(dir, path), 'value = ' + index + '\n')
+      changes.push({ path, added: new Set([1]), before: 'value = -1\n' })
+    }
+    const grounded = await buildGround(dir, changes)
+    assert.equal(grounded.foreign.length, changes.length)
+    assert.deepEqual(grounded.foreign.map((file) => file.path), changes.map((file) => file.path))
+    assert.ok(grounded.foreign.every((file) => file.beforeTree !== undefined))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 // Per-language pack checks live in langtest.ts, one process each: eleven wasm
 // grammars cannot share a process without exhausting it. `npm test` runs both.
@@ -501,7 +529,7 @@ check('compact defaults the column when a finding has no span', () => {
 })
 check('each provider reads its own key', () => {
   const base = { model: 'm', verifiers: ['*'], judges: ['*'], minSeverity: 'low' as const,
-    ignore: [], promptCache: true }
+    ignore: [], coverage: 'portable' as const, promptCache: true }
   const saved = { a: process.env.ANTHROPIC_API_KEY, o: process.env.OPENAI_API_KEY,
     g: process.env.GEMINI_API_KEY, gg: process.env.GOOGLE_API_KEY }
   process.env.ANTHROPIC_API_KEY = 'a'; process.env.OPENAI_API_KEY = 'o'
@@ -592,6 +620,31 @@ check('a review that did not complete never renders as clean', () => {
   assert.match(partial, /partial, not a verdict/)
   assert.match(partial, /outside\.ts \(no types\)/)
 })
+check('portable coverage is a verdict, but never masquerades as full semantic coverage', () => {
+  const unavailable = [
+    '1 file(s) without enriched semantic coverage: web/app.ts (types, references)',
+    '2 enriched check(s) unavailable: phantom-api (no types), contract-drift (no references)',
+  ]
+  const out = terminal([], {
+    subtitle: 'workspace', verified: 0, judged: 0, state: 'complete', notLookedAt: [],
+    coverage: 'portable', unavailableCoverage: unavailable,
+  })
+  assert.match(out, /No findings in portable coverage\./)
+  assert.match(out, /web\/app\.ts \(types, references\)/)
+  assert.doesNotMatch(out, /not a verdict/)
+
+  const md = markdown([], {
+    state: 'complete', notLookedAt: [], coverage: 'portable',
+    files: [{ path: 'web/app.ts', unavailable: ['types', 'references'] }],
+    checks: { unavailable: [
+      { check: 'phantom-api', missing: 'types' },
+      { check: 'contract-drift', missing: 'references' },
+    ] },
+  })
+  assert.match(md, /\*\*Portable coverage\.\*\*/)
+  assert.match(md, /No findings in portable coverage\./)
+  assert.doesNotMatch(md, /^No findings\.$/m)
+})
 check('findings are still shown when a stage failed, with the warning kept', () => {
   const f: Finding = { id: 'F1', class: 'verified', check: 'phantom-dep', severity: 'high',
     confidence: 'proven', file: 'a.ts', line: 1, title: 'missing dep' }
@@ -654,6 +707,23 @@ check('manifest names are matched the way PyPI matches them', () => {
 check('no manifest means nothing to be wrong about', () => {
   assert.equal(pythonManifest('/definitely/not/a/repo'), undefined)
   assert.deepEqual(localModules('/definitely/not/a/repo'), new Set())
+})
+check('local Python modules are discovered from the changed package, not the whole monorepo', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-py-local-')))
+  try {
+    const app = join(dir, 'services', 'api', 'src', 'app.py')
+    mkdirSync(join(dir, 'services', 'api', 'src', 'localpkg'), { recursive: true })
+    mkdirSync(join(dir, 'unrelated', 'hiddenpkg'), { recursive: true })
+    writeFileSync(app, 'from localpkg import value\n')
+    writeFileSync(join(dir, 'services', 'api', 'src', 'localpkg', '__init__.py'), 'value = 1\n')
+    writeFileSync(join(dir, 'unrelated', 'hiddenpkg', '__init__.py'), 'value = 2\n')
+
+    const local = localModules(dir, dirname(app))
+    assert.equal(local.has('localpkg'), true)
+    assert.equal(local.has('hiddenpkg'), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 console.log('\nruby gems')
@@ -959,7 +1029,7 @@ check('self-review publishes machine findings only for a complete verdict', () =
   const workflow = readFileSync(join(process.cwd(), '.github', 'workflows', 'review.yml'), 'utf8')
   assert.equal(workflow.match(/node "\$PSH" review/g)?.length, 1)
   assert.match(workflow, /name: Check out the untrusted review target[\s\S]+allow-unsafe-pr-checkout: true/)
-  assert.match(workflow, /name: Install the target type environment[\s\S]+working-directory: target[\s\S]+npm ci --ignore-scripts/)
+  assert.doesNotMatch(workflow, /working-directory: target[\s\S]{0,120}npm ci/)
   assert.match(workflow, /steps\.review\.outputs\.status == '0' \|\| steps\.review\.outputs\.status == '1'/)
   assert.match(workflow, /sarif_file: powershot\.sarif\s+checkout_path: target\s+ref: refs\/pull\/\$\{\{ github\.event\.pull_request\.number \}\}\/head\s+sha: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/)
 })
@@ -973,6 +1043,10 @@ check('the public action persists judge answers and publishes only a verdict', (
   assert.match(action, /inline-comments:\s*\n\s+description: [^\n]+\n\s+default: 'false'/)
   assert.match(action, /Post inline comments[\s\S]+inputs\.inline-comments == 'true'[\s\S]+steps\.review\.outputs\.complete == 'true'/)
   assert.match(action, /node "\$GITHUB_ACTION_PATH\/dist\/github\/inline-comments\.js"/)
+  assert.match(action, /--report manifest=powershot\.manifest\.json/)
+  assert.match(action, /coverage=\$COVERAGE/)
+  assert.match(action, /m\.coverage === "full" \|\| m\.coverage === "portable" \? m\.coverage : "unknown"/)
+  assert.match(action, /Approve a clean review[\s\S]+steps\.review\.outputs\.coverage == 'full'/)
 })
 check('published CI examples preserve one verdict and its exit status', () => {
   const action = readFileSync(join(process.cwd(), 'examples', 'github-actions', 'action.yml'), 'utf8')
@@ -981,12 +1055,13 @@ check('published CI examples preserve one verdict and its exit status', () => {
   assert.match(action, /upload-sarif: 'true'/)
   assert.match(action, /inline-comments: 'true'/)
   assert.match(action, /runs-on: ubuntu-24\.04/)
-  assert.match(action, /npm ci --ignore-scripts[\s\S]+uses: xcrft\/powershot@v1/)
-  assert.match(github, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.1/)
+  assert.doesNotMatch(action, /npm ci|NPM_AUTH_TOKEN|NODE_AUTH_TOKEN/)
+  assert.match(action, /uses: xcrft\/powershot@v1/)
+  assert.match(github, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.2/)
   assert.equal(github.match(/psh review/g)?.length, 1)
   assert.match(github, /--report markdown=powershot\.md[\s\S]+--report sarif=powershot\.sarif/)
   assert.match(github, /\|\| STATUS=\$\?[\s\S]+case "\$STATUS"/)
-  assert.match(gitlab, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.1/)
+  assert.match(gitlab, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.2/)
   assert.equal(gitlab.match(/psh review/g)?.length, 1)
   assert.match(gitlab, /--format codequality > gl-code-quality-report\.json \|\| STATUS=\$\?/)
   assert.match(gitlab, /test "\$STATUS" -le 1 \|\| exit "\$STATUS"/)
@@ -1006,6 +1081,15 @@ check('the viewer is one self-contained page', () => {
   assert.match(html, /<!doctype html>/)
   assert.equal(/<(script|link|img)[^>]+(src|href)="http/.test(html), false) // no network needed
   assert.equal((html.match(/class="f /g) ?? []).length, 2)
+})
+check('the viewer labels a complete portable session', () => {
+  const html = viewer([], {
+    id: 'portable', target: 'workspace', started: '2026-01-01T10:00:00Z',
+    state: 'complete', notLookedAt: [], coverage: 'portable',
+    unavailableCoverage: ['1 file(s) without enriched semantic coverage: app.ts (types)'],
+  })
+  assert.match(html, /Portable coverage\./)
+  assert.match(html, /No findings in portable coverage\./)
 })
 check('the viewer escapes content rather than rendering it', () => {
   const nasty: Finding[] = [{ ...sample[0]!, title: '<img src=x onerror=alert(1)>' }]
@@ -1037,7 +1121,7 @@ check('delegated output distinguishes an empty verdict from malformed data', () 
 check('delegate --checks selects only the requested judging brief', () => {
   const cfg = {
     provider: 'anthropic' as const, model: 'm', verifiers: ['*'], judges: ['*'],
-    minSeverity: 'low' as const, ignore: [], promptCache: true,
+    minSeverity: 'low' as const, ignore: [], coverage: 'portable' as const, promptCache: true,
   }
   const brief = delegateBrief(ground([{ path: 'a.ts', after: 'export const a = 1\n' }]), cfg, {
     checks: ['intent'], intent: 'add a',
@@ -1856,6 +1940,12 @@ check('judges accept both the plain list and the { enable } form', () => {
   assert.equal(validateConfig({ judges: { enable: ['securty'] } }, KNOWN).length, 1)
   assert.equal(validateConfig({ judges: 'security' }, KNOWN).length, 1) // not a list at all
 })
+check('coverage is portable by default and strict only when requested', () => {
+  assert.equal(loadConfig(process.cwd()).coverage, 'portable')
+  assert.deepEqual(validateConfig({ coverage: 'portable' }, KNOWN), [])
+  assert.deepEqual(validateConfig({ coverage: 'strict' }, KNOWN), [])
+  assert.match(validateConfig({ coverage: 'complete' }, KNOWN)[0]!, /not one of: portable, strict/)
+})
 
 console.log('\nsession safety')
 check('a session will not be resumed by a different model than answered it', () => {
@@ -2132,6 +2222,32 @@ check('the manifest accounts for everything it selected', () => {
   // and a failure anywhere means the run is not a verdict
   assert.equal(m2.build({ ...base, failures: ['judge died'] }).state, 'failed')
 })
+check('portable oracle gaps stay visible without turning the run into a partial verdict', () => {
+  const manifest = new RunManifest('portable')
+  manifest.ran('swallowed-error')
+  const record = manifest.build({
+    operation: 'review', target: { requested: {} },
+    policy: { source: 'base', hash: 'h' },
+    engine: { version: '0', tools: false, verifyOnly: true },
+    files: [{
+      path: 'web/app.ts', disposition: 'selected', bytes: 1, addedLines: 1,
+      language: 'typescript', checks: ['swallowed-error'], unavailable: ['types', 'references'],
+    }],
+    skippedChecks: [],
+    unavailableChecks: [
+      { check: 'phantom-api', missing: 'types' },
+      { check: 'contract-drift', missing: 'references' },
+    ],
+    findings: { total: 0, verified: 0, judged: 0, dismissed: 0, droppedPosition: 0 },
+    usage: { requests: 0, inputTokens: 0, outputTokens: 0, toolCalls: 0, elapsedMs: 0, units: 0 },
+    failures: [],
+  })
+  assert.equal(record.state, 'complete')
+  assert.deepEqual(record.notLookedAt, [])
+  assert.deepEqual(record.files[0]!.unavailable, ['types', 'references'])
+  assert.equal(record.checks.unavailable?.length, 2)
+  assert.deepEqual(coverageProblems(record), [])
+})
 check('a manifest that hides an unreached unit is caught as our bug', () => {
   const broken = {
     schema: SCHEMA, id: 'x', operation: 'review', started: '', ended: '',
@@ -2282,6 +2398,7 @@ await checkAsync('per-file limits follow the checks the caller actually selected
       operation: 'scan', target: { requested: {} }, policy: { source: 'default', hash: 'h' },
       engine: { version: '0', tools: false, verifyOnly: true }, files: result.plan?.items() ?? [],
       skippedChecks: result.skippedChecks ?? [],
+      unavailableChecks: result.unavailableChecks ?? [],
       findings: { total: result.findings.length, verified: result.stats.verified, judged: result.stats.judged,
         dismissed: result.stats.dismissed, droppedPosition: 0 },
       usage: result.usage!, failures: result.failures,
@@ -2296,6 +2413,129 @@ await checkAsync('per-file limits follow the checks the caller actually selected
     assert.deepEqual(typed.plan?.items()[0]?.missing, ['types'])
     assert.deepEqual(typed.skippedChecks, [{ check: 'phantom-api', missing: 'types' }])
     assert.equal(stateOf(typed), 'partial')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+await checkAsync('portable coverage reviews every declared language together without repository installs', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-portable-mixed-')))
+  try {
+    const sources: Record<string, { path: string; source: string }> = {
+      python: { path: 'services/api/app.py', source: 'def answer() -> int:\n    try:\n        risky()\n    except Exception:\n        pass\n    return 42\n' },
+      go: { path: 'services/agent/main.go', source: 'package agent\nfunc answer() int {\n  if err := risky(); err != nil {\n  }\n  return 42\n}\n' },
+      java: { path: 'services/jvm/App.java', source: 'class App { int answer() { try { risky(); } catch (Exception e) { } return 42; } }\n' },
+      rust: { path: 'crates/worker/src/lib.rs', source: 'pub fn answer() -> i32 { match risky() { Err(_) => {}, Ok(v) => v }; 42 }\n' },
+      cpp: { path: 'native/app.cpp', source: 'int answer() { try { risky(); } catch (...) { } return 42; }\n' },
+      c: { path: 'native/app.c', source: 'int answer(void) { return 42; }\n' },
+      'c#': { path: 'dotnet/App.cs', source: 'class App { int Answer() { try { Risky(); } catch (Exception e) { } return 42; } }\n' },
+      php: { path: 'php/app.php', source: '<?php function answer() { try { risky(); } catch (Exception $e) { } return 42; }\n' },
+      kotlin: { path: 'android/App.kt', source: 'fun answer(): Int { try { risky() } catch (e: Exception) {} ; return 42 }\n' },
+      ruby: { path: 'ruby/app.rb', source: 'def answer\n  begin\n    risky\n  rescue => e\n  end\n  42\nend\n' },
+      solidity: { path: 'contracts/App.sol', source: 'contract App { function answer() public returns (uint) { try this.risky() { } catch { } return 42; } function risky() external {} }\n' },
+    }
+    assert.deepEqual(Object.keys(sources).sort(), PACKS.map((pack) => pack.name).sort())
+
+    const native = [
+      { path: 'web/app.ts', source: 'export const answer = 42\n' },
+      { path: 'web/legacy.js', source: 'export const legacyAnswer = 42\n' },
+    ]
+    const all = [...native, ...Object.values(sources)]
+    for (const file of all) {
+      mkdirSync(dirname(join(dir, file.path)), { recursive: true })
+      writeFileSync(join(dir, file.path), file.source)
+    }
+    const changes = all.map((file) => ({
+      path: file.path,
+      added: new Set(file.source.split('\n').slice(0, -1).map((_, line) => line + 1)),
+      before: file.source.replace('42', '41'),
+    }))
+    const manifest = new RunManifest('portable-mixed')
+    const result = await review({
+      root: dir, range: {}, changes, config: loadConfig(dir), verifyOnly: true, manifest,
+    })
+    const record = manifest.build({
+      operation: 'review', target: { requested: {} }, policy: { source: 'default', hash: 'h' },
+      engine: { version: '0', tools: false, verifyOnly: true }, files: result.plan!.items(),
+      skippedChecks: result.skippedChecks ?? [], unavailableChecks: result.unavailableChecks ?? [],
+      findings: { total: result.findings.length, verified: result.stats.verified, judged: result.stats.judged,
+        dismissed: result.stats.dismissed, droppedPosition: result.droppedPosition ?? 0 },
+      usage: result.usage!, failures: result.failures,
+    })
+
+    assert.equal(record.state, 'complete')
+    assert.deepEqual(record.notLookedAt, [])
+    assert.equal(record.files.length, all.length)
+    assert.ok(record.files.every((file) => file.disposition === 'selected'), 'a declared language cannot be waived')
+    assert.ok(record.files.every((file) => file.checks.length > 0), 'every declared language needs baseline checks')
+    const swallowed = new Set(result.findings.filter((finding) => finding.check === 'swallowed-error').map((finding) => finding.file))
+    for (const [language, file] of Object.entries(sources)) {
+      if (language !== 'c') assert.equal(swallowed.has(file.path), true, language + ' isolated AST must drive its oracle')
+    }
+    assert.deepEqual(record.files.find((file) => file.path === 'web/app.ts')?.unavailable, ['types', 'references'])
+    assert.ok(record.checks.unavailable?.some((check) => check.check === 'phantom-api' && check.missing === 'types'))
+    assert.deepEqual(coverageProblems(record), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+await checkAsync('strict coverage keeps missing semantic oracles verdict-blocking', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-strict-')))
+  try {
+    writeFileSync(join(dir, 'app.ts'), 'export const answer = 42\n')
+    const manifest = new RunManifest('strict')
+    const result = await review({
+      root: dir,
+      range: {},
+      changes: [{ path: 'app.ts', added: new Set([1]), before: 'export const answer = 41\n' }],
+      config: { ...loadConfig(dir), coverage: 'strict' },
+      verifyOnly: true,
+      manifest,
+    })
+    const record = manifest.build({
+      operation: 'review', target: { requested: {} }, policy: { source: 'default', hash: 'h' },
+      engine: { version: '0', tools: false, verifyOnly: true }, files: result.plan!.items(),
+      skippedChecks: result.skippedChecks ?? [], unavailableChecks: result.unavailableChecks ?? [],
+      findings: { total: result.findings.length, verified: result.stats.verified, judged: result.stats.judged,
+        dismissed: result.stats.dismissed, droppedPosition: result.droppedPosition ?? 0 },
+      usage: result.usage!, failures: result.failures,
+    })
+    assert.equal(record.state, 'partial')
+    assert.deepEqual(record.files[0]!.missing, ['types', 'references'])
+    assert.deepEqual(record.files[0]!.unavailable, undefined)
+    assert.ok(record.checks.skipped.some((check) => check.check === 'phantom-api' && check.missing === 'types'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+await checkAsync('portable coverage still blocks when an existing foreign base cannot be parsed', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-foreign-base-limit-')))
+  try {
+    writeFileSync(join(dir, 'app.py'), 'def answer():\n    return 42\n')
+    const manifest = new RunManifest('foreign-base-limit')
+    const result = await review({
+      root: dir,
+      range: {},
+      changes: [{
+        path: 'app.py',
+        added: new Set([1, 2]),
+        before: 'value = 1\n'.repeat(60_000),
+      }],
+      config: loadConfig(dir),
+      verifyOnly: true,
+      manifest,
+    })
+    const record = manifest.build({
+      operation: 'review', target: { requested: {} }, policy: { source: 'default', hash: 'h' },
+      engine: { version: '0', tools: false, verifyOnly: true }, files: result.plan!.items(),
+      skippedChecks: result.skippedChecks ?? [], unavailableChecks: result.unavailableChecks ?? [],
+      findings: { total: result.findings.length, verified: result.stats.verified, judged: result.stats.judged,
+        dismissed: result.stats.dismissed, droppedPosition: result.droppedPosition ?? 0 },
+      usage: result.usage!, failures: result.failures,
+    })
+    assert.equal(record.state, 'partial')
+    assert.ok(record.files[0]!.missing?.includes('base'))
+    assert.ok(record.checks.skipped.some((check) => check.missing.includes('base')))
+    assert.deepEqual(coverageProblems(record), [])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

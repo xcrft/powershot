@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
+import { Worker } from 'node:worker_threads'
 
 export type Node = {
   type: string
@@ -586,26 +587,12 @@ let ready: Promise<ParserCtor> | undefined
 const parsers = new Map<string, { parse(s: string): Tree }>()
 
 /**
- * Measured, not guessed, and the measurement is worth writing down because the naive
- * one is misleading. Loading grammars is cheap — all eleven load for ~143MB. Parsing
- * with them is not: V8 tiers up each wasm module in the background, and RSS climbed
- * 63 → 690MB across eleven before the process died inside that compilation. Six
- * grammars sat at ~131MB and were comfortable.
- */
-const MAX_GRAMMARS = 6
-export const skippedLanguages: string[] = []
-
-/**
  * Grammars load lazily and once. A repository with no Python pays nothing for
  * Python, and the wasm runtime is only initialised when a foreign file appears.
  */
 async function parserFor(pack: LanguagePack): Promise<{ parse(s: string): Tree } | undefined> {
   const cached = parsers.get(pack.name)
   if (cached) return cached
-  if (parsers.size >= MAX_GRAMMARS) {
-    if (!skippedLanguages.includes(pack.name)) skippedLanguages.push(pack.name)
-    return undefined
-  }
 
   try {
     if (!ready) {
@@ -638,4 +625,126 @@ export async function parse(pack: LanguagePack, source: string): Promise<Tree | 
   } catch {
     return undefined
   }
+}
+
+type NativeNode = Node & {
+  startIndex: number
+  endIndex: number
+  isNamed: boolean
+  fieldNameForChild(index: number): string | null
+}
+
+export type SerializedNode = {
+  type: string
+  startIndex: number
+  endIndex: number
+  startPosition: Node['startPosition']
+  endPosition: Node['endPosition']
+  named: boolean
+  field?: string
+  children: SerializedNode[]
+}
+
+export type SerializedTree = { root: SerializedNode }
+
+/** Turn a native WASM-backed tree into data that can cross a worker boundary. */
+export function serializeTree(tree: Tree): SerializedTree {
+  const copy = (raw: Node, field?: string): SerializedNode => {
+    const node = raw as NativeNode
+    const children: SerializedNode[] = []
+    for (let i = 0; i < node.childCount; i++) {
+      const child = node.child(i)
+      if (child) children.push(copy(child, node.fieldNameForChild(i) ?? undefined))
+    }
+    return {
+      type: node.type,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
+      startPosition: { ...node.startPosition },
+      endPosition: { ...node.endPosition },
+      named: node.isNamed,
+      field,
+      children,
+    }
+  }
+  return { root: copy(tree.rootNode) }
+}
+
+/** Restore the small Node interface the language-independent verifiers consume. */
+function hydrateTree(source: string, tree: SerializedTree): Tree {
+  const hydrate = (data: SerializedNode): Node => {
+    const children = data.children.map(hydrate)
+    return {
+      type: data.type,
+      get text() { return source.slice(data.startIndex, data.endIndex) },
+      startPosition: { ...data.startPosition },
+      endPosition: { ...data.endPosition },
+      childCount: children.length,
+      child: (index) => children[index] ?? null,
+      namedChildren: children.filter((_, index) => data.children[index]?.named),
+      childForFieldName: (name) => {
+        const index = data.children.findIndex((child) => child.field === name)
+        return index < 0 ? null : (children[index] ?? null)
+      },
+    }
+  }
+  return { rootNode: hydrate(tree.root) }
+}
+
+/**
+ * Parse one language in a disposable worker.
+ *
+ * V8 keeps compiled WASM grammars alive longer than their JS parsers. Eleven
+ * grammars in one process reached ~690MB and killed real mixed-language runs.
+ * One worker owns one grammar, returns plain trees, and is then terminated, so
+ * compiled-grammar memory is bounded by one language rather than by the monorepo's
+ * language count. Plain trees still scale with the selected diff.
+ */
+export function parseIsolated(
+  pack: LanguagePack,
+  sources: string[],
+  signal?: AbortSignal,
+): Promise<(Tree | undefined)[]> {
+  if (sources.length === 0) return Promise.resolve([])
+  if (signal?.aborted) return Promise.resolve(sources.map(() => undefined))
+
+  return new Promise((resolve) => {
+    let worker: Worker
+    let settled = false
+    const empty = (): undefined[] => sources.map(() => undefined)
+    const finish = (trees: (Tree | undefined)[]): void => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener('abort', abort)
+      // Resolve only after V8 has released this worker's WASM grammar. Otherwise a
+      // fast next batch can overlap termination and recreate the memory spike this
+      // isolation boundary exists to prevent.
+      void worker.terminate().then(
+        () => resolve(trees),
+        () => resolve(trees),
+      )
+    }
+    const abort = (): void => finish(empty())
+
+    try {
+      worker = new Worker(new URL('./parse-worker.js', import.meta.url), {
+        workerData: { language: pack.name, sources },
+      })
+    } catch {
+      resolve(empty())
+      return
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    worker.once('message', (raw: (SerializedTree | undefined)[]) => {
+      if (!Array.isArray(raw) || raw.length !== sources.length) {
+        finish(empty())
+        return
+      }
+      finish(raw.map((tree, index) => tree ? hydrateTree(sources[index]!, tree) : undefined))
+    })
+    worker.once('error', () => finish(empty()))
+    worker.once('exit', () => finish(empty()))
+    // Close the narrow race between the early check and listener registration.
+    if (signal?.aborted) abort()
+  })
 }

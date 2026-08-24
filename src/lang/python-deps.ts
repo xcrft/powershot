@@ -142,30 +142,42 @@ const SKIP_DIRS = new Set([
   '.mypy_cache', '.pytest_cache', '.tox', 'site-packages', 'target', '.next',
 ])
 
-export function localModules(root: string): Set<string> {
+/**
+ * Importable names near one changed Python file.
+ *
+ * Only direct entries in its ancestor chain and conventional source roots are read.
+ * That bounds work by path depth instead of repository size, while still covering
+ * `src/pkg` beside `tests/test_pkg.py` and namespace packages without __init__.py.
+ */
+export function localModules(root: string, from = root): Set<string> {
   const local = new Set<string>()
+  const scanned = new Set<string>()
 
-  const walk = (dir: string, depth: number): void => {
-    if (depth > 6 || local.size > 4000) return
+  const inspect = (dir: string): void => {
+    if (scanned.has(dir)) return
+    scanned.add(dir)
     let entries: import('node:fs').Dirent[]
     try {
       entries = readdirSync(dir, { withFileTypes: true })
     } catch {
       return
     }
-    const isPackage = entries.some((e) => e.isFile() && e.name === '__init__.py')
     for (const entry of entries) {
       if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue
       if (entry.isDirectory()) {
-        // a package directory is importable by name; so is a plain source folder
+        // Namespace packages are importable without __init__.py too.
         local.add(entry.name)
-        walk(join(dir, entry.name), depth + 1)
-      } else if (entry.name.endsWith('.py') && (isPackage || depth <= 2)) {
+      } else if (entry.isFile() && entry.name.endsWith('.py') && entry.name !== '__init__.py') {
         local.add(entry.name.slice(0, -3))
       }
     }
   }
-  walk(root, 0)
+
+  for (let dir = from; ; dir = dirname(dir)) {
+    inspect(dir)
+    for (const source of ['src', 'lib', 'python']) inspect(join(dir, source))
+    if (dir === root || dirname(dir) === dir) break
+  }
   return local
 }
 

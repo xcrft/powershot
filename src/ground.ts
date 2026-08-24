@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { decode } from './text.js'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { ChangedFile, ForeignFile, Ground } from './types.js'
-import { packFor, parse } from './lang/packs.js'
+import { PACKS, packFor, parseIsolated } from './lang/packs.js'
 import { insideRepo, isSymlink, repoPath } from './fspolicy.js'
 
 const CODE_EXT = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/
@@ -383,7 +383,8 @@ export function readEnvManifest(root: string): { keys: Set<string>; file: string
 }
 
 async function parseForeign(root: string, changed: ChangedFile[], signal?: AbortSignal): Promise<ForeignFile[]> {
-  const out: ForeignFile[] = []
+  type Candidate = { changed: ChangedFile; source: string; beforeSource?: string }
+  const byLanguage = new Map<string, Candidate[]>()
   for (const c of changed) {
     // parsing thousands of files is where a large scan spends its time, so a signal
     // has to be honoured here rather than only once the checks begin
@@ -395,12 +396,66 @@ async function parseForeign(root: string, changed: ChangedFile[], signal?: Abort
     // a generated or minified file is not source anyone reviews, and parsing one
     // costs seconds to produce findings nobody acts on
     if ((statSync(abs, { throwIfNoEntry: false })?.size ?? 0) > 512 * 1024) continue
-    const tree = await parse(pack, decode(readFileSync(abs)))
-    if (!tree) continue
-    const beforeTree = c.before === undefined ? undefined : await parse(pack, c.before)
-    out.push({ path: c.path, pack, tree, beforeTree, changed: c })
+    const list = byLanguage.get(pack.name) ?? []
+    list.push({
+      changed: c,
+      source: decode(readFileSync(abs)),
+      // A generated base can be arbitrarily larger than the reviewed result. Do not
+      // smuggle it past the current-file limit through the before/after channel.
+      beforeSource: c.before !== undefined && Buffer.byteLength(c.before) <= 512 * 1024
+        ? c.before
+        : undefined,
+    })
+    byLanguage.set(pack.name, list)
   }
-  return out
+
+  const parsed = new Map<string, ForeignFile>()
+  // A worker holds one grammar and a bounded source batch. This keeps both WASM
+  // compilation and structured-clone payloads independent of monorepo size.
+  const MAX_BATCH_BYTES = 8 * 1024 * 1024
+  const MAX_BATCH_FILES = 128
+  for (const pack of PACKS) {
+    const candidates = byLanguage.get(pack.name) ?? []
+    for (let start = 0; start < candidates.length;) {
+      let end = start
+      let bytes = 0
+      while (end < candidates.length && end - start < MAX_BATCH_FILES) {
+        const candidate = candidates[end]!
+        const next = Buffer.byteLength(candidate.source) + Buffer.byteLength(candidate.beforeSource ?? '')
+        if (end > start && bytes + next > MAX_BATCH_BYTES) break
+        bytes += next
+        end++
+      }
+
+      const batch = candidates.slice(start, end)
+      const sources = batch.flatMap((candidate) =>
+        candidate.beforeSource === undefined
+          ? [candidate.source]
+          : [candidate.source, candidate.beforeSource],
+      )
+      const trees = await parseIsolated(pack, sources, signal)
+      let index = 0
+      for (const candidate of batch) {
+        const tree = trees[index++]
+        const beforeTree = candidate.beforeSource === undefined ? undefined : trees[index++]
+        if (!tree) continue
+        parsed.set(candidate.changed.path, {
+          path: candidate.changed.path,
+          pack,
+          tree,
+          beforeTree,
+          changed: candidate.changed,
+        })
+      }
+      start = end
+      if (signal?.aborted) break
+    }
+    if (signal?.aborted) break
+  }
+  return changed.flatMap((file) => {
+    const result = parsed.get(file.path)
+    return result ? [result] : []
+  })
 }
 
 function buildSymbolIndex(sourceFiles: SourceFile[], root: string): Ground['symbolIndex'] {

@@ -34,6 +34,8 @@ export type PlanItem = {
    * already visible in the skipped list.
    */
   missing?: Capability[]
+  /** Enriched capabilities unavailable under portable coverage; visible, but not verdict-blocking. */
+  unavailable?: Capability[]
 }
 
 /**
@@ -91,6 +93,14 @@ export class SelectionPlan {
     const row = this.rows.get(path)
     if (row && row.disposition === 'selected' && missing.length > 0) {
       row.missing = [...new Set([...(row.missing ?? []), ...missing])]
+    }
+  }
+
+  /** Record optional semantic depth that this environment could not provide. */
+  noteUnavailable(path: string, unavailable: Capability[]): void {
+    const row = this.rows.get(path)
+    if (row && row.disposition === 'selected' && unavailable.length > 0) {
+      row.unavailable = [...new Set([...(row.unavailable ?? []), ...unavailable])]
     }
   }
 
