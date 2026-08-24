@@ -41,6 +41,10 @@ name: PowerShot
 on:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: write
@@ -77,10 +81,20 @@ and bounded batches, so all declared languages can coexist in one monorepo revie
 Set `upload-sarif: 'false'` and omit `security-events: write` when GitHub code scanning
 is unavailable or the workflow should not publish SARIF.
 
-`comment: 'true'` maintains one summary through a hidden PowerShot marker. Reruns
-update only that marked `github-actions[bot]` comment, so comments created by other
-workflows under the same bot identity are left alone. The first marked run reuses the
-newest legacy `## PowerShot` summary from v1.1.2 or older when one exists.
+`comment: 'true'` maintains one summary through a hidden marker scoped to the caller's
+workflow file and job. Reruns update only that exact `github-actions[bot]` comment, so
+another workflow or job using the same bot identity is left alone. Each candidate also
+records its pull-request head. A new head gets a new candidate, which means an old run
+never patches or retires the current head's comment. The first scoped run replaces the
+newest unmarked legacy `## PowerShot` summary from v1.1.2 or older without claiming the
+ambiguous legacy comment through `PATCH`.
+
+PowerShot checks the target head throughout reconciliation and removes its own
+just-created candidate if it observes a changed head. Simultaneous same-head runs
+relist and converge on one scoped candidate when they complete. Keep the example's
+`concurrency` block to reduce overlap and canceled stale work. GitHub's issue-comment
+REST API has no atomic create-if-absent operation, and cancellation cannot stop a REST
+request already in flight, so concurrency reduces but cannot eliminate that window.
 
 `inline-comments: 'true'` requires `pull-requests: write`. It publishes at most ten
 findings as one review. Only deterministic `verified` findings with `proven`

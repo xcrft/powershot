@@ -171,6 +171,9 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
         GITHUB_ACTION_PATH: ${{ github.action_path }}
         POWERSHOT_PR_NUMBER: ${{ github.event.number }}
+        POWERSHOT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+        GITHUB_JOB: ${{ github.job }}
       run: node "$GITHUB_ACTION_PATH/dist/github/summary-comment.js"
 
     - name: Approve a clean review

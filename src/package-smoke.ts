@@ -66,6 +66,7 @@ try {
     const installed = join(dir, 'node_modules', ...packageName.split('/'))
     if (!existsSync(join(installed, 'docs', 'architecture.md'))) throw new Error('architecture guide is missing')
     if (!existsSync(join(installed, 'docs', 'ci.md'))) throw new Error('CI guide is missing')
+    if (!existsSync(join(installed, 'dist', 'github', 'api.js'))) throw new Error('GitHub REST runtime is missing')
     if (!existsSync(join(installed, 'dist', 'github', 'inline-comments.js'))) throw new Error('inline review runtime is missing')
     if (!existsSync(join(installed, 'dist', 'github', 'summary-comment.js'))) throw new Error('summary comment runtime is missing')
     if (!existsSync(join(installed, 'examples', 'github-actions', 'cli.yml'))) throw new Error('CI example is missing')
