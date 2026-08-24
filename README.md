@@ -216,11 +216,19 @@ The composite action is the shortest setup for GitHub:
     verify-only: 'true'
     upload-sarif: 'true'
     comment: 'true'
+    inline-comments: 'true'
     fail-on-findings: 'true'
 ```
 
 `@v1` follows compatible `1.x` releases. Pin the action to a full commit SHA in a
 protected required workflow when immutable dependencies are required.
+
+`inline-comments` is opt-in. It posts at most ten `verified` + `proven` findings of
+`medium` severity or higher as one GitHub review, and only when GitHub confirms the
+finding line was added by the pull request. Reruns keep matching bot comments and
+retire stale PowerShot copies that have no replies. Human comments and discussions
+are preserved. Every finding still stays in the full report and, when `comment` is
+enabled, the summary comment.
 
 The [CI guide](docs/ci.md) covers exit handling, Git history, one-run/many-report
 artifacts, GitLab Code Quality, local parity, and recommended gate policies.

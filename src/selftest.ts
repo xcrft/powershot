@@ -54,6 +54,18 @@ import { highlight, isJsx } from './report/highlight.js'
 import { normalizeName, readEnvManifest, relPath } from './ground.js'
 import { incompleteReasons } from './bench.js'
 import { PACKAGE_NAME, PACKAGE_VERSION } from './package-meta.js'
+import {
+  addedLinesFromPatch,
+  createReviewPayload,
+  GitHubPullRequestApi,
+  inlineMarker,
+  parseReviewFindings,
+  reconcileInlineComments,
+  selectInlineComments,
+  syncInlineComments,
+  type ExistingReviewComment,
+  type PullRequestApi,
+} from './github/inline-comments.js'
 
 const root = '/repo'
 
@@ -686,6 +698,234 @@ const sample: Finding[] = [
     file: 'src/b.ts', line: 9, title: 'off by one' },
 ]
 
+check('GitHub patches expose only added right-side lines for inline comments', () => {
+  const patch = [
+    '@@ -1,3 +1,4 @@',
+    ' context',
+    '-old',
+    '+new',
+    '+extra',
+    ' tail',
+    '@@ -20,0 +22,2 @@',
+    '+later',
+    '\\ No newline at end of file',
+    '+latest',
+  ].join('\n')
+  assert.deepEqual([...addedLinesFromPatch(patch)], [2, 3, 22, 23])
+})
+
+check('inline review selects only proven medium-or-higher verified findings on added lines', () => {
+  const finding = (overrides: Partial<Finding>): Finding => ({
+    id: 'F', class: 'verified', check: 'phantom-dep', severity: 'high', confidence: 'proven',
+    file: 'src/a.ts', line: 3, title: 'finding', ...overrides,
+  })
+  const findings = [
+    finding({ id: 'critical', severity: 'critical', line: 4, title: 'critical finding' }),
+    finding({ id: 'medium', severity: 'medium', line: 3, title: 'medium finding' }),
+    finding({ id: 'context', line: 2 }),
+    finding({ id: 'low', severity: 'low' }),
+    finding({ id: 'judged', class: 'judged' }),
+    finding({ id: 'firm', confidence: 'firm' }),
+    finding({ id: 'other-file', file: 'src/missing.ts' }),
+  ]
+  const files = [{ filename: 'src/a.ts', patch: '@@ -2,1 +2,3 @@\n context\n+first\n+second' }]
+
+  assert.deepEqual(selectInlineComments(findings, files).map((comment) => comment.line), [4, 3])
+  assert.deepEqual(selectInlineComments(findings, files, 1).map((comment) => comment.line), [4])
+  assert.deepEqual(selectInlineComments(findings, files, 0), [])
+
+  const many = Array.from({ length: 12 }, (_, index) => finding({ line: index + 3, title: `finding ${index}` }))
+  const manyPatch = '@@ -2,0 +3,12 @@\n' + many.map((_, index) => `+line ${index}`).join('\n')
+  assert.equal(selectInlineComments(many, [{ filename: 'src/a.ts', patch: manyPatch }], 100).length, 10)
+})
+
+check('inline comment markdown renders finding prose literally and carries a stable marker', () => {
+  const finding: Finding = {
+    id: 'F1', class: 'verified', check: 'check`id', severity: 'high', confidence: 'proven',
+    file: 'src/a.ts', line: 3, title: '@team <img src=x> [click](https://example.invalid)',
+    evidence: { oracle: 'manifest', detail: 'line one\n> forged quote' },
+  }
+  const [comment] = selectInlineComments(
+    [finding],
+    [{ filename: finding.file, patch: '@@ -2,0 +3,1 @@\n+line' }],
+  )
+  assert.ok(comment)
+  assert.equal(comment.body.includes('@team'), false)
+  assert.equal(comment.body.includes('<img'), false)
+  assert.equal(comment.body.includes('[click]('), false)
+  assert.equal(comment.body.endsWith(inlineMarker(finding)), true)
+  assert.equal(comment.body.match(/<!-- powershot:inline:/g)?.length, 1)
+})
+
+check('inline publishing rejects a malformed machine report instead of silently dropping it', () => {
+  assert.deepEqual(parseReviewFindings(JSON.stringify({ findings: [sample[0]] })), [sample[0]])
+  assert.throws(
+    () => parseReviewFindings(JSON.stringify({ findings: [{ ...sample[0], line: 0 }] })),
+    /invalid contract/,
+  )
+  assert.throws(() => parseReviewFindings('{}'), /findings array/)
+})
+
+check('inline reruns keep exact bot comments, batch only missing ones, and retire stale bot copies', () => {
+  const findings: Finding[] = [
+    { id: 'F1', class: 'verified', check: 'a', severity: 'critical', confidence: 'proven', file: 'a.ts', line: 1, title: 'one' },
+    { id: 'F2', class: 'verified', check: 'b', severity: 'high', confidence: 'proven', file: 'b.ts', line: 2, title: 'two' },
+  ]
+  const desired = selectInlineComments(findings, [
+    { filename: 'a.ts', patch: '@@ -0,0 +1,1 @@\n+one' },
+    { filename: 'b.ts', patch: '@@ -1,0 +2,1 @@\n+two' },
+  ])
+  const existing: ExistingReviewComment[] = [
+    { id: 1, path: desired[0]!.path, line: desired[0]!.line, body: desired[0]!.body, user: { login: 'github-actions[bot]' } },
+    { id: 2, path: desired[0]!.path, line: desired[0]!.line, body: desired[0]!.body, user: { login: 'github-actions[bot]' } },
+    { id: 3, path: desired[0]!.path, line: desired[0]!.line, body: 'old\n' + inlineMarker(findings[0]!), user: { login: 'github-actions[bot]' } },
+    { id: 4, path: desired[1]!.path, line: desired[1]!.line, body: desired[1]!.body, user: { login: 'human' } },
+    { id: 5, path: desired[0]!.path, line: desired[0]!.line, body: 'discussion', user: { login: 'human' }, inReplyToId: 2 },
+    { id: 6, path: desired[0]!.path, line: desired[0]!.line, body: 'discussed old\n' + inlineMarker(findings[0]!), user: { login: 'github-actions[bot]' } },
+    { id: 7, path: desired[0]!.path, line: desired[0]!.line, body: 'still investigating', user: { login: 'human' }, inReplyToId: 6 },
+  ]
+
+  const plan = reconcileInlineComments(desired, existing)
+  assert.equal(plan.kept, 1)
+  assert.deepEqual(plan.create, [desired[1]])
+  assert.deepEqual(plan.staleIds, [1, 3])
+
+  const settled = reconcileInlineComments(desired, desired.map((comment, index) => ({
+    id: index + 10, path: comment.path, line: comment.line, body: comment.body,
+    user: { login: 'github-actions[bot]' },
+  })))
+  assert.deepEqual(settled, { create: [], staleIds: [], kept: 2 })
+})
+
+check('the batched GitHub review carries the required comment body and current commit', () => {
+  const comment = { path: 'a.ts', line: 1, side: 'RIGHT' as const, body: 'finding' }
+  const payload = createReviewPayload('a'.repeat(40), [comment])
+  assert.equal(payload.commit_id, 'a'.repeat(40))
+  assert.equal(payload.event, 'COMMENT')
+  assert.match(payload.body, /1 proven verified finding/)
+  assert.deepEqual(payload.comments, [comment])
+})
+
+await checkAsync('the GitHub client paginates files, submits the review contract, and treats delete 404 as settled', async () => {
+  const originalFetch = globalThis.fetch
+  const calls: { url: string; method: string; body?: string }[] = []
+  const json = (value: unknown, init: ResponseInit = {}): Response =>
+    new Response(JSON.stringify(value), { status: 200, ...init })
+
+  const fakeFetch: typeof fetch = async (input, init) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    const body = typeof init?.body === 'string' ? init.body : undefined
+    calls.push({ url, method, body })
+    assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer token')
+
+    if (url.endsWith('/pulls/7')) return json({ head: { sha: 'a'.repeat(40) } })
+    if (url.includes('/pulls/7/files') && !url.includes('page=2')) {
+      return json([{ filename: 'a.ts', patch: '@@ -0,0 +1,1 @@\n+one' }], {
+        headers: { link: '<https://api.github.test/repos/acme/repo/pulls/7/files?per_page=100&page=2>; rel="next"' },
+      })
+    }
+    if (url.includes('/pulls/7/files') && url.includes('page=2')) {
+      return json([{ filename: 'b.bin' }])
+    }
+    if (url.includes('/pulls/7/comments')) {
+      return json([
+        { id: 9, path: 'a.ts', line: 1, body: 'old', user: { login: 'github-actions[bot]' } },
+        { id: 10, path: 'a.ts', line: 1, body: 'reply', in_reply_to_id: 9, user: { login: 'human' } },
+      ])
+    }
+    if (method === 'POST' && url.endsWith('/pulls/7/reviews')) return json({ id: 1 })
+    if (method === 'DELETE' && url.endsWith('/pulls/comments/9')) return json({ message: 'gone' }, { status: 404 })
+    return json({ message: 'unexpected request' }, { status: 500 })
+  }
+
+  globalThis.fetch = fakeFetch
+  try {
+    const api = new GitHubPullRequestApi('https://api.github.test', 'token', 'acme', 'repo', 7)
+    assert.equal(await api.headSha(), 'a'.repeat(40))
+    assert.deepEqual(await api.listFiles(), [
+      { filename: 'a.ts', patch: '@@ -0,0 +1,1 @@\n+one' },
+      { filename: 'b.bin', patch: undefined },
+    ])
+    const comments = await api.listReviewComments()
+    assert.equal(comments[0]?.id, 9)
+    assert.equal(comments[1]?.inReplyToId, 9)
+    await api.createReview('a'.repeat(40), [{ path: 'a.ts', line: 1, side: 'RIGHT', body: 'finding' }])
+    await api.deleteReviewComment(9)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  const submitted = calls.find((call) => call.method === 'POST')
+  assert.ok(submitted?.body)
+  assert.deepEqual(JSON.parse(submitted.body), {
+    commit_id: 'a'.repeat(40),
+    body: 'PowerShot posted 1 proven verified finding(s) on changed lines.',
+    event: 'COMMENT',
+    comments: [{ path: 'a.ts', line: 1, side: 'RIGHT', body: 'finding' }],
+  })
+  assert.equal(calls.filter((call) => call.url.includes('/files')).length, 2)
+})
+
+await checkAsync('inline synchronization creates one review before removing stale comments', async () => {
+  const finding: Finding = {
+    id: 'F1', class: 'verified', check: 'a', severity: 'high', confidence: 'proven',
+    file: 'a.ts', line: 1, title: 'one',
+  }
+  const events: string[] = []
+  const api: PullRequestApi = {
+    headSha: async () => 'a'.repeat(40),
+    listFiles: async () => [{ filename: 'a.ts', patch: '@@ -0,0 +1,1 @@\n+one' }],
+    listReviewComments: async () => [{
+      id: 7, path: 'old.ts', line: 1,
+      body: 'old\n<!-- powershot:inline:v1:0123456789abcdef01234567 -->',
+      user: { login: 'github-actions[bot]' },
+    }],
+    createReview: async (commitId, comments) => {
+      events.push(`create:${commitId}:${comments.length}`)
+    },
+    deleteReviewComment: async (id) => {
+      events.push(`delete:${id}`)
+    },
+  }
+
+  const result = await syncInlineComments(api, [finding], 'a'.repeat(40))
+  assert.deepEqual(events, [`create:${'a'.repeat(40)}:1`, 'delete:7'])
+  assert.deepEqual(result, { outdated: false, desired: 1, created: 1, kept: 0, retired: 1 })
+})
+
+await checkAsync('inline synchronization makes no writes for an outdated pull request head', async () => {
+  let reads = 0
+  const api: PullRequestApi = {
+    headSha: async () => 'b'.repeat(40),
+    listFiles: async () => { reads++; return [] },
+    listReviewComments: async () => { reads++; return [] },
+    createReview: async () => { throw new Error('must not create') },
+    deleteReviewComment: async () => { throw new Error('must not delete') },
+  }
+
+  const result = await syncInlineComments(api, [], 'a'.repeat(40))
+  assert.equal(reads, 0)
+  assert.deepEqual(result, { outdated: true, desired: 0, created: 0, kept: 0, retired: 0 })
+})
+
+await checkAsync('inline synchronization makes no writes when the pull request head changes during reads', async () => {
+  let headReads = 0
+  let writes = 0
+  const api: PullRequestApi = {
+    headSha: async () => ++headReads === 1 ? 'a'.repeat(40) : 'b'.repeat(40),
+    listFiles: async () => [{ filename: 'a.ts', patch: '@@ -0,0 +1,1 @@\n+one' }],
+    listReviewComments: async () => [],
+    createReview: async () => { writes++ },
+    deleteReviewComment: async () => { writes++ },
+  }
+
+  const result = await syncInlineComments(api, [sample[0]!], 'a'.repeat(40))
+  assert.equal(headReads, 2)
+  assert.equal(writes, 0)
+  assert.deepEqual(result, { outdated: true, desired: 0, created: 0, kept: 0, retired: 0 })
+})
+
 check('nested modules use the native package import map', () => {
   const manifest = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
   assert.equal(manifest.imports?.['#app/*.js'], './dist/*.js')
@@ -728,17 +968,22 @@ check('the public action persists judge answers and publishes only a verdict', (
   assert.match(action, /restore-keys:/)
   assert.match(action, /upload-sarif:\s*\n\s+description: [^\n]+\n\s+default: 'true'/)
   assert.match(action, /Upload SARIF[\s\S]+inputs\.upload-sarif == 'true'[\s\S]+steps\.review\.outputs\.complete == 'true'/)
+  assert.match(action, /inline-comments:\s*\n\s+description: [^\n]+\n\s+default: 'false'/)
+  assert.match(action, /Post inline comments[\s\S]+inputs\.inline-comments == 'true'[\s\S]+steps\.review\.outputs\.complete == 'true'/)
+  assert.match(action, /node "\$GITHUB_ACTION_PATH\/dist\/github\/inline-comments\.js"/)
 })
 check('published CI examples preserve one verdict and its exit status', () => {
   const action = readFileSync(join(process.cwd(), 'examples', 'github-actions', 'action.yml'), 'utf8')
   const github = readFileSync(join(process.cwd(), 'examples', 'github-actions', 'cli.yml'), 'utf8')
   const gitlab = readFileSync(join(process.cwd(), 'examples', 'gitlab', '.gitlab-ci.yml'), 'utf8')
   assert.match(action, /upload-sarif: 'true'/)
-  assert.match(github, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.0\.1/)
+  assert.match(action, /inline-comments: 'true'/)
+  assert.match(action, /runs-on: ubuntu-24\.04/)
+  assert.match(github, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.0/)
   assert.equal(github.match(/psh review/g)?.length, 1)
   assert.match(github, /--report markdown=powershot\.md[\s\S]+--report sarif=powershot\.sarif/)
   assert.match(github, /\|\| STATUS=\$\?[\s\S]+case "\$STATUS"/)
-  assert.match(gitlab, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.0\.1/)
+  assert.match(gitlab, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.0/)
   assert.equal(gitlab.match(/psh review/g)?.length, 1)
   assert.match(gitlab, /--format codequality > gl-code-quality-report\.json \|\| STATUS=\$\?/)
   assert.match(gitlab, /test "\$STATUS" -le 1 \|\| exit "\$STATUS"/)

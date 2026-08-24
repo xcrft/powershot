@@ -27,7 +27,8 @@ There are two independent decisions:
 ## GitHub Action
 
 The action runs one review, adds a job summary, uploads SARIF when enabled, and can
-maintain one pull-request comment.
+maintain one pull-request comment. Its opt-in inline mode posts a bounded batched
+review on changed lines.
 
 ```yaml
 name: PowerShot
@@ -42,7 +43,7 @@ permissions:
 
 jobs:
   review:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -53,11 +54,20 @@ jobs:
           verify-only: 'true'
           upload-sarif: 'true'
           comment: 'true'
+          inline-comments: 'true'
           fail-on-findings: 'true'
 ```
 
 Set `upload-sarif: 'false'` and omit `security-events: write` when GitHub code scanning
 is unavailable or the workflow should not publish SARIF.
+
+`inline-comments: 'true'` requires `pull-requests: write`. It publishes at most ten
+findings as one review. Only deterministic `verified` findings with `proven`
+confidence, severity `medium` or higher, and a GitHub-confirmed added line qualify.
+Findings on context lines or files whose patch GitHub omitted stay in the full report.
+Reruns preserve exact bot comments, create only missing comments, and remove stale
+PowerShot inline copies without replies. Human comments and replied-to discussions
+are never modified.
 
 The major tag follows compatible `1.x` releases. Pin a full commit SHA in a protected
 required workflow when immutable dependencies are required. The copy-paste version
@@ -73,6 +83,7 @@ lives at [`examples/github-actions/action.yml`](../examples/github-actions/actio
 | `checks` | empty | Select comma-separated check ids |
 | `upload-sarif` | `true` | Upload a complete SARIF report to GitHub code scanning |
 | `comment` | `true` | Maintain a pull-request comment |
+| `inline-comments` | `false` | Post up to ten proven verified findings as one inline review |
 | `fail-on-findings` | `false` | Turn a complete finding verdict into a failed job |
 | `approve` | `false` | Approve only a complete, clean review |
 
@@ -88,7 +99,7 @@ step inside a larger quality job. The complete example is
 The core pattern is:
 
 ```bash
-npm install --global --ignore-scripts @0xcraft/powershot@1.0.1
+npm install --global --ignore-scripts @0xcraft/powershot@1.1.0
 
 STATUS=0
 psh review --verify-only \

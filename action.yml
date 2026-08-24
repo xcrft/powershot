@@ -25,6 +25,9 @@ inputs:
   comment:
     description: Post the review as a pull request comment
     default: 'true'
+  inline-comments:
+    description: Post up to 10 proven verified findings on changed pull request lines
+    default: 'false'
   fail-on-findings:
     description: Fail the job when anything is reported
     default: 'false'
@@ -139,6 +142,16 @@ runs:
       with:
         sarif_file: powershot.sarif
         category: powershot
+
+    - name: Post inline comments
+      if: always() && inputs.inline-comments == 'true' && github.event_name == 'pull_request' && steps.review.outputs.complete == 'true' && hashFiles('powershot.json') != ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+        POWERSHOT_PR_NUMBER: ${{ github.event.number }}
+        POWERSHOT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: node "$GITHUB_ACTION_PATH/dist/github/inline-comments.js"
 
     - name: Comment on the pull request
       # always, so an incomplete review is still explained — the body says so itself

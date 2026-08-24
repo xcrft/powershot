@@ -66,6 +66,7 @@ try {
     const installed = join(dir, 'node_modules', ...packageName.split('/'))
     if (!existsSync(join(installed, 'docs', 'architecture.md'))) throw new Error('architecture guide is missing')
     if (!existsSync(join(installed, 'docs', 'ci.md'))) throw new Error('CI guide is missing')
+    if (!existsSync(join(installed, 'dist', 'github', 'inline-comments.js'))) throw new Error('inline review runtime is missing')
     if (!existsSync(join(installed, 'examples', 'github-actions', 'cli.yml'))) throw new Error('CI example is missing')
     if (!existsSync(join(installed, 'examples', 'gitlab', '.gitlab-ci.yml'))) throw new Error('GitLab example is missing')
   })
