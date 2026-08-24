@@ -209,8 +209,10 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
   const groundDone = stage('ground')
   const g = await buildGround(root, changed, opts.signal)
   groundDone(
-    g.project.getSourceFiles().length + ' files · ' + g.symbolIndex.size + ' symbols' +
-      (g.typed ? '' : ' · no tsconfig, phantom-api disabled'),
+    g.sourceFiles.length + ' files · ' + g.symbolIndex.size + ' symbols' +
+      (g.configFiles.length === 0
+        ? ' · no usable relevant tsconfig, type checks disabled'
+        : ' · ' + g.configFiles.length + ' project(s)' + (g.typed ? '' : ' · type environment incomplete')),
   )
 
   const wanted = (v: Verifier): boolean => {

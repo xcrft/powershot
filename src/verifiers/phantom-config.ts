@@ -49,10 +49,11 @@ export const phantomConfig: Verifier = {
     const manifest = g.envManifest
     if (!manifest) return []
 
-    // a key used elsewhere in the codebase is a documentation gap, not an invention
+    // A key used elsewhere in the relevant project is established configuration,
+    // even if the shared manifest is behind. Suppress that lower-signal case.
     const usedElsewhere = new Set<string>()
     const changedPaths = new Set(g.changed.map((c) => c.path))
-    for (const sf of g.project.getSourceFiles()) {
+    for (const sf of g.sourceFiles) {
       const path = relPath(sf, g.root)
       if (changedPaths.has(path) || path.includes('node_modules')) continue
       for (const read of envReads(sf)) usedElsewhere.add(read.name)
@@ -70,18 +71,17 @@ export const phantomConfig: Verifier = {
           class: 'verified',
           check: 'phantom-config',
           severity: 'medium',
-          // The manifest is not the process environment. What the oracle settles is
-          // that nothing in the repository declares or uses this key — a deployment
+          // The manifest is not the process environment. The exact observation is
+          // only that the checked-in manifest does not declare the key; a deployment
           // can still set it, so "will be undefined" is an inference, not a fact.
           confidence: 'firm',
           file: relPath(sf, g.root),
           line: read.line,
           span: locate(sf, read.start, read.width).span,
-          title:
-            'Reads process.env.' + read.name + ', which is not declared in ' + manifest.file + ' or used anywhere else',
+          title: 'Reads process.env.' + read.name + ', which is not declared in ' + manifest.file,
           evidence: {
             oracle: manifest.file,
-            detail: 'the key appears in no manifest entry and in no other source file',
+            detail: 'the key appears in no manifest entry',
           },
           fix: 'Add ' + read.name + ' to ' + manifest.file + ', or drop the reference if it was invented',
         })

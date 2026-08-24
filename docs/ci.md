@@ -63,7 +63,9 @@ jobs:
 Type-aware checks use the checked-out project's declarations, so install its
 dependencies before PowerShot. Lifecycle scripts are disabled here because pull
 request code is untrusted; use the equivalent safe install for another package
-manager.
+manager. For a monorepo without a root install, repeat the safe install step with the
+relevant package `working-directory`. PowerShot finds nested `tsconfig.json` and
+`tsconfig.*.json` files automatically; the workflow does not need to list projects.
 
 Set `upload-sarif: 'false'` and omit `security-events: write` when GitHub code scanning
 is unavailable or the workflow should not publish SARIF.
@@ -106,7 +108,7 @@ step inside a larger quality job. The complete example is
 The core pattern is:
 
 ```bash
-npm install --global --ignore-scripts @0xcraft/powershot@1.1.0
+npm install --global --ignore-scripts @0xcraft/powershot@1.1.1
 
 STATUS=0
 psh review --verify-only \

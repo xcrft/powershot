@@ -1,12 +1,13 @@
 import { Project, SyntaxKind, type SourceFile } from 'ts-morph'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { decode } from './text.js'
-import { join, dirname } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { ChangedFile, ForeignFile, Ground } from './types.js'
 import { packFor, parse } from './lang/packs.js'
 import { insideRepo, isSymlink, repoPath } from './fspolicy.js'
 
 const CODE_EXT = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/
+const TS_CONFIG = /^tsconfig(?:\..+)?\.json$/i
 const MISSING_TYPE_PREFIXES = [
   'Cannot find global type',
   'Cannot find global value',
@@ -33,23 +34,169 @@ export function normalizeName(n: string): string {
   return n.toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 
-/**
- * Walks up, but never past `stop`.
- *
- * A tsconfig above the repository is somebody else's, and letting one configure the
- * program that reviews this repository lets a parent directory decide what is
- * type-checked and where paths resolve to.
- */
-function findUp(from: string, name: string, stop = from): string | undefined {
-  let dir = from
-  for (;;) {
-    const p = join(dir, name)
-    if (existsSync(p)) return p
-    if (dir === stop) return undefined
+type ConfiguredProject = {
+  configPath: string
+  project: Project
+  /** Files TypeScript loaded from the config before PowerShot added excluded changes. */
+  owned: Set<string>
+  /** Ancestors of owned source directories, used to choose the closest leaf config. */
+  sourceAncestors: Set<string>
+  sourceCount: number
+}
+
+/** A lexical repository containment check for paths that have already been resolved. */
+function isWithin(root: string, path: string): boolean {
+  const rel = relative(root, path)
+  return rel === '' || (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel))
+}
+
+/** Directories from a changed file up to the repository root, nearest first. */
+function ancestorDirectories(root: string, absPath: string): string[] {
+  const out: string[] = []
+  let dir = dirname(absPath)
+  while (isWithin(root, dir)) {
+    out.push(dir)
+    if (dir === root) break
     const parent = dirname(dir)
-    if (parent === dir) return undefined
+    if (parent === dir) break
     dir = parent
   }
+  return out
+}
+
+/** Only inspect the directory chain of changed files; never crawl the monorepo. */
+function configsInDirectory(dir: string, cache: Map<string, string[]>): string[] {
+  const known = cache.get(dir)
+  if (known) return known
+
+  let configs: string[] = []
+  try {
+    configs = readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && TS_CONFIG.test(entry.name))
+      .map((entry) => join(dir, entry.name))
+      .sort()
+  } catch {
+    // An unreadable ancestor contributes no project; the file remains syntax-only.
+  }
+  cache.set(dir, configs)
+  return configs
+}
+
+function configuredProject(root: string, configPath: string): ConfiguredProject | undefined {
+  try {
+    const project = new Project({ tsConfigFilePath: configPath })
+    const owned = new Set<string>()
+    const sourceAncestors = new Set<string>()
+
+    for (const sf of project.getSourceFiles()) {
+      const abs = resolve(sf.getFilePath())
+      const safe = insideRepo(root, abs)
+      if (!safe || repoPath(root, abs).split('/').includes('node_modules')) continue
+      owned.add(repoPath(root, abs))
+
+      let dir = dirname(abs)
+      while (isWithin(root, dir)) {
+        sourceAncestors.add(dir)
+        if (dir === root) break
+        const parent = dirname(dir)
+        if (parent === dir) break
+        dir = parent
+      }
+    }
+
+    return { configPath, project, owned, sourceAncestors, sourceCount: owned.size }
+  } catch {
+    // A broken candidate beside a usable leaf config must not take down the review.
+    return undefined
+  }
+}
+
+function directoryDepth(root: string, dir: string): number {
+  const rel = repoPath(root, dir)
+  return rel === '' ? 0 : rel.split('/').length
+}
+
+function sourceAffinity(root: string, candidate: ConfiguredProject, absPath: string): number {
+  let dir = dirname(absPath)
+  while (isWithin(root, dir)) {
+    if (candidate.sourceAncestors.has(dir)) return directoryDepth(root, dir)
+    if (dir === root) break
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return -1
+}
+
+function nameAffinity(root: string, configPath: string, absPath: string): number {
+  const base = basename(configPath)
+  const name = base.slice('tsconfig'.length, -'.json'.length).replace(/^\./, '')
+  if (name === '') return 0
+  const tokens = new Set(
+    repoPath(root, absPath).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
+  )
+  return name
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .filter((token) => tokens.has(token)).length
+}
+
+/** Prefer the leaf project whose existing sources live closest to this file. */
+function bestProject(root: string, candidates: ConfiguredProject[], absPath: string): ConfiguredProject {
+  return [...candidates].sort(
+    (a, b) =>
+      sourceAffinity(root, b, absPath) - sourceAffinity(root, a, absPath) ||
+      nameAffinity(root, b.configPath, absPath) - nameAffinity(root, a.configPath, absPath) ||
+      a.sourceCount - b.sourceCount ||
+      a.configPath.localeCompare(b.configPath),
+  )[0]!
+}
+
+function looksLikeTest(path: string): boolean {
+  return /(?:^|[/\\])(?:__tests__|tests?)(?:[/\\]|$)/i.test(path) || /\.(?:test|spec)\.[^.]+$/i.test(path)
+}
+
+/**
+ * Resolve one changed file at the nearest useful project boundary.
+ *
+ * Solution configs (`files: []`) do not claim a type environment. If a sibling leaf
+ * config owns the file it wins; if every leaf excludes the file (common for tests),
+ * the closest suitable non-empty leaf supplies compiler options and references.
+ * Selecting that local leaf avoids opening a repository-wide parent.
+ */
+function projectForFile(
+  root: string,
+  absPath: string,
+  directoryCache: Map<string, string[]>,
+  projectCache: Map<string, ConfiguredProject | undefined>,
+): ConfiguredProject | undefined {
+  const rel = repoPath(root, absPath)
+  for (const dir of ancestorDirectories(root, absPath)) {
+    const configPaths = [...configsInDirectory(dir, directoryCache)].sort((a, b) =>
+      nameAffinity(root, b, absPath) - nameAffinity(root, a, absPath) || a.localeCompare(b),
+    )
+    const projects: ConfiguredProject[] = []
+    for (const configPath of configPaths) {
+      if (!projectCache.has(configPath)) {
+        projectCache.set(configPath, configuredProject(root, configPath))
+      }
+      const project = projectCache.get(configPath)
+      if (!project) continue
+      // Config names such as `test`, `app`, and `node` are ranked against the file
+      // path, so the first owner is the most specific without opening every sibling.
+      if (project.owned.has(rel)) return project
+      projects.push(project)
+    }
+
+    const boundaryDepth = directoryDepth(root, dir)
+    const leaves = projects.filter((project) =>
+      project.sourceCount > 0 &&
+      (sourceAffinity(root, project, absPath) > boundaryDepth || looksLikeTest(absPath)),
+    )
+    if (leaves.length > 0) return bestProject(root, leaves, absPath)
+  }
+  return undefined
 }
 
 function depsIn(pkgPath: string): Set<string> {
@@ -91,37 +238,43 @@ function makeDepsFor(root: string): (absPath: string) => Set<string> {
 }
 
 /**
- * Build the oracle once per run: a type-checked project over the working tree,
- * a syntax-only project holding the base-ref versions, and a symbol index.
+ * Build the oracle once per run: focused type-checked projects for the changed
+ * packages, a syntax-only project for unconfigured changes and the base-ref trees,
+ * and one deduplicated symbol index over the relevant project closures.
  */
 export async function buildGround(root: string, changed: ChangedFile[], signal?: AbortSignal): Promise<Ground> {
-  const tsConfigFilePath = findUp(root, 'tsconfig.json')
-  const typed = Boolean(tsConfigFilePath)
+  root = resolve(root)
+  const directoryCache = new Map<string, string[]>()
+  const projectCache = new Map<string, ConfiguredProject | undefined>()
+  const selectedProjects = new Set<ConfiguredProject>()
+  const assigned = new Map<string, ConfiguredProject>()
+  const syntaxProject = new Project({ compilerOptions: { allowJs: true, checkJs: false } })
 
-  const project = typed
-    ? new Project({ tsConfigFilePath })
-    : new Project({ compilerOptions: { allowJs: true, checkJs: false } })
-
-  if (!typed) project.addSourceFilesAtPaths([`${root}/**/*.{ts,tsx,js,jsx,mts,cts}`, `!${root}/**/node_modules/**`])
-
-  // What the tsconfig itself owns. A file added past this point is present for
-  // reading, but the checker has no program for it — asking one for diagnostics
-  // throws from inside TypeScript, which took the whole review down with it.
-  const owned = new Set<string>(project.getSourceFiles().map((f) => repoPath(root, String(f.getFilePath()))))
-
-  // A changed file may be new, or excluded from tsconfig — make sure it is present.
-  // `readable` is the gate for every file that becomes reviewable: the glob above
-  // follows symlinks, so passing this on the way in is not enough on its own.
+  // `readable` is the gate for every file that becomes reviewable. A tsconfig glob
+  // can follow symlinks, so selected project closures are checked again below too.
   const readable = (path: string): string | undefined => {
     const abs = insideRepo(root, path)
     return abs && !isSymlink(abs) ? abs : undefined
   }
 
   for (const c of changed) {
+    if (signal?.aborted) break
     if (!CODE_EXT.test(c.path)) continue
     const abs = readable(c.path)
-    if (!abs) continue
-    if (!project.getSourceFile(abs) && existsSync(abs)) project.addSourceFileAtPath(abs)
+    if (!abs || !existsSync(abs)) continue
+
+    const configured = projectForFile(root, abs, directoryCache, projectCache)
+    if (configured) {
+      selectedProjects.add(configured)
+      assigned.set(c.path, configured)
+      // Tests and tooling files are often excluded from the production build config.
+      // Adding one explicitly keeps the leaf project's compiler options and imports.
+      if (!configured.project.getSourceFile(abs)) configured.project.addSourceFileAtPath(abs)
+    } else if (!syntaxProject.getSourceFile(abs)) {
+      // No recursive glob: a configless million-file repository still loads only the
+      // files in the review.
+      syntaxProject.addSourceFileAtPath(abs)
+    }
   }
 
   const beforeProject = new Project({ useInMemoryFileSystem: true })
@@ -130,35 +283,60 @@ export async function buildGround(root: string, changed: ChangedFile[], signal?:
     if (!CODE_EXT.test(c.path)) continue
     const abs = readable(c.path)
     if (!abs) continue
-    const sf = project.getSourceFile(abs)
+    const configured = assigned.get(c.path)
+    const sf = configured?.project.getSourceFile(abs) ?? syntaxProject.getSourceFile(abs)
     if (!sf) continue
     const before =
       c.before === undefined ? undefined : beforeProject.createSourceFile(`/before/${c.path}`, c.before, { overwrite: true })
-    const ownedByConfig = typed && owned.has(repoPath(root, c.path))
     files.push({
       sf,
       changed: c,
       before,
       // A bound program with unresolved ambient types is not an exact type oracle.
       // Keep the file reviewable, but make type-dependent checks explicitly partial.
-      typed: ownedByConfig && !hasTypeEnvironmentGap(sf),
+      typed: configured !== undefined && !hasTypeEnvironmentGap(sf),
     })
   }
 
+  const projects = [...selectedProjects].map((selected) => selected.project)
+  if (syntaxProject.getSourceFiles().length > 0) projects.push(syntaxProject)
+  const sourceFiles = uniqueSourceFiles(root, files.map((file) => file.sf), projects)
+  const configFiles = [...selectedProjects]
+    .map((selected) => repoPath(root, selected.configPath))
+    .sort()
+  const typed = files.some((file) => file.typed)
+  const depsFor = makeDepsFor(root)
+
   return {
     root,
-    project,
+    sourceFiles,
+    configFiles,
     beforeProject,
     changed,
     files,
-    symbolIndex: buildSymbolIndex(project, root),
-    deps: makeDepsFor(root)(join(root, 'x.ts')),
-    depsFor: makeDepsFor(root),
+    symbolIndex: buildSymbolIndex(sourceFiles, root),
+    deps: depsFor(join(root, 'x.ts')),
+    depsFor,
     typed,
-    internalPrefixes: pathAliasPrefixes(project, root),
+    internalPrefixes: pathAliasPrefixes(projects),
     foreign: await parseForeign(root, changed, signal),
     envManifest: readEnvManifest(root),
   }
+}
+
+/** Prefer changed-file SourceFiles, then add each relevant project source once. */
+function uniqueSourceFiles(root: string, preferred: SourceFile[], projects: Project[]): SourceFile[] {
+  const byPath = new Map<string, SourceFile>()
+  const add = (sf: SourceFile): void => {
+    const abs = resolve(sf.getFilePath())
+    if (!insideRepo(root, abs)) return
+    const rel = repoPath(root, abs)
+    if (rel.split('/').includes('node_modules') || byPath.has(rel)) return
+    byPath.set(rel, sf)
+  }
+  for (const sf of preferred) add(sf)
+  for (const project of projects) for (const sf of project.getSourceFiles()) add(sf)
+  return [...byPath.values()]
 }
 
 /**
@@ -166,47 +344,14 @@ export async function buildGround(root: string, changed: ChangedFile[], signal?:
  * They look like package names but resolve to local files, so treating them as
  * dependencies would be wrong.
  */
-function pathAliasPrefixes(project: Project, root: string): string[] {
+function pathAliasPrefixes(projects: Project[]): string[] {
   const prefixes = new Set<string>()
-  for (const pattern of Object.keys(project.getCompilerOptions().paths ?? {})) {
-    prefixes.add(pattern.replace(/\*$/, ''))
-  }
-  // a workspace declares its aliases in each package's tsconfig, and the root config
-  // often only `extends` a shared base — so the root's paths are not the whole story
-  for (const file of tsconfigsIn(root)) {
-    try {
-      const raw = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1')
-      const parsed = JSON.parse(raw.replace(/,(\s*[}\]])/g, '$1'))
-      for (const pattern of Object.keys(parsed?.compilerOptions?.paths ?? {})) {
-        prefixes.add(String(pattern).replace(/\*$/, ''))
-      }
-    } catch {
-      // an unreadable or non-standard tsconfig simply contributes no aliases
+  for (const project of projects) {
+    for (const pattern of Object.keys(project.getCompilerOptions().paths ?? {})) {
+      prefixes.add(pattern.replace(/\*$/, ''))
     }
   }
   return [...prefixes]
-}
-
-/** every tsconfig in the repo, capped so a huge monorepo cannot stall the run */
-function tsconfigsIn(root: string): string[] {
-  const out: string[] = []
-  const walk = (dir: string, depth: number): void => {
-    if (depth > 4 || out.length > 60) return
-    let entries: import('node:fs').Dirent[]
-    try {
-      entries = readdirSync(dir, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const e of entries) {
-      if (e.name === 'node_modules' || e.name.startsWith('.')) continue
-      const full = join(dir, e.name)
-      if (e.isDirectory()) walk(full, depth + 1)
-      else if (e.name === 'tsconfig.json') out.push(full)
-    }
-  }
-  walk(root, 0)
-  return out
 }
 
 /**
@@ -258,9 +403,9 @@ async function parseForeign(root: string, changed: ChangedFile[], signal?: Abort
   return out
 }
 
-function buildSymbolIndex(project: Project, root: string): Ground['symbolIndex'] {
+function buildSymbolIndex(sourceFiles: SourceFile[], root: string): Ground['symbolIndex'] {
   const index: Ground['symbolIndex'] = new Map()
-  for (const sf of project.getSourceFiles()) {
+  for (const sf of sourceFiles) {
     const path = String(sf.getFilePath())
     // the project glob follows symlinked directories, so what it loaded is not
     // proof of where the file is

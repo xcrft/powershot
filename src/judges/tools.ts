@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import type { Ground } from '#app/types.js'
 import { relPath } from '#app/ground.js'
-import { deniedPath, insideRepo } from '#app/fspolicy.js'
+import { insideRepo, repoPath } from '#app/fspolicy.js'
 
 const MAX_BYTES = 60_000
 const MAX_MATCHES = 40
@@ -66,7 +66,7 @@ function readFile(g: Ground, input: Record<string, unknown>): string {
   const abs = insideRepo(g.root, path)
   if (!abs) return 'Refused: that path is outside the repository or is not readable for review.'
 
-  const inProject = g.project.getSourceFile(abs)
+  const inProject = g.sourceFiles.find((file) => relPath(file, g.root) === repoPath(g.root, abs))
   const text = inProject ? inProject.getFullText() : readFileSync(abs, 'utf8')
   const lines = text.split('\n')
 
@@ -89,7 +89,7 @@ function grep(g: Ground, input: Record<string, unknown>): string {
   const filter = input.path_contains === undefined ? undefined : String(input.path_contains)
 
   const hits: string[] = []
-  for (const sf of g.project.getSourceFiles()) {
+  for (const sf of g.sourceFiles) {
     const abs = sf.getFilePath()
     // the project glob can pull in a file through a symlinked directory, so the
     // boundary is re-checked here rather than trusted from how the file got loaded
@@ -105,14 +105,14 @@ function grep(g: Ground, input: Record<string, unknown>): string {
       if (hits.length >= MAX_MATCHES) return hits.join('\n') + '\n… more matches not shown'
     }
   }
-  return hits.length > 0 ? hits.join('\n') : 'No matches.'
+  return hits.length > 0 ? hits.join('\n') : 'No matches in the relevant project files.'
 }
 
 function references(g: Ground, input: Record<string, unknown>): string {
   const symbol = String(input.symbol ?? '')
   if (!symbol) return 'No symbol given.'
 
-  for (const sf of g.project.getSourceFiles()) {
+  for (const sf of g.sourceFiles) {
     const path = String(sf.getFilePath())
     if (path.includes('/node_modules/') || !insideRepo(g.root, path)) continue
     const decl = sf.getFunction(symbol) ?? sf.getVariableDeclaration(symbol) ?? sf.getClass(symbol)
@@ -125,8 +125,8 @@ function references(g: Ground, input: Record<string, unknown>): string {
       .filter((r) => !r.includes('node_modules'))
 
     return refs.length === 0
-      ? symbol + ' is declared in ' + relPath(sf, g.root) + ' and referenced nowhere.'
+      ? symbol + ' is declared in ' + relPath(sf, g.root) + ' and referenced nowhere in its project.'
       : symbol + ' declared in ' + relPath(sf, g.root) + ', referenced at:\n' + [...new Set(refs)].slice(0, MAX_MATCHES).join('\n')
   }
-  return 'No declaration named ' + symbol + ' found in the project.'
+  return 'No declaration named ' + symbol + ' found in the relevant projects.'
 }

@@ -5,7 +5,7 @@ powershot:
   variables:
     GIT_DEPTH: "0"
   before_script:
-    - npm install --global --ignore-scripts @0xcraft/powershot@1.1.0
+    - npm install --global --ignore-scripts @0xcraft/powershot@1.1.1
   script:
     - |
       STATUS=0
