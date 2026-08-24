@@ -19,6 +19,9 @@ inputs:
   checks:
     description: Comma-separated check names, or empty for the configured set
     default: ''
+  upload-sarif:
+    description: Upload the SARIF report to GitHub code scanning
+    default: 'true'
   comment:
     description: Post the review as a pull request comment
     default: 'true'
@@ -131,7 +134,7 @@ runs:
         exit 1
 
     - name: Upload SARIF
-      if: always() && steps.review.outputs.complete == 'true' && hashFiles('powershot.sarif') != ''
+      if: always() && inputs.upload-sarif == 'true' && steps.review.outputs.complete == 'true' && hashFiles('powershot.sarif') != ''
       uses: github/codeql-action/upload-sarif@6d786de4d6f3531a740e445b53a42b622bbbace8 # v3
       with:
         sarif_file: powershot.sarif

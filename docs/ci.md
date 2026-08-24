@@ -26,8 +26,8 @@ There are two independent decisions:
 
 ## GitHub Action
 
-The action runs one review, adds a job summary, uploads SARIF, and can maintain one
-pull-request comment.
+The action runs one review, adds a job summary, uploads SARIF when enabled, and can
+maintain one pull-request comment.
 
 ```yaml
 name: PowerShot
@@ -51,9 +51,13 @@ jobs:
       - uses: xcrft/powershot@v1
         with:
           verify-only: 'true'
+          upload-sarif: 'true'
           comment: 'true'
           fail-on-findings: 'true'
 ```
+
+Set `upload-sarif: 'false'` and omit `security-events: write` when GitHub code scanning
+is unavailable or the workflow should not publish SARIF.
 
 The major tag follows compatible `1.x` releases. Pin a full commit SHA in a protected
 required workflow when immutable dependencies are required. The copy-paste version
@@ -67,6 +71,7 @@ lives at [`examples/github-actions/action.yml`](../examples/github-actions/actio
 | `anthropic-api-key` | empty | Enable configured model judges |
 | `min-severity` | `low` | Filter findings below a severity |
 | `checks` | empty | Select comma-separated check ids |
+| `upload-sarif` | `true` | Upload a complete SARIF report to GitHub code scanning |
 | `comment` | `true` | Maintain a pull-request comment |
 | `fail-on-findings` | `false` | Turn a complete finding verdict into a failed job |
 | `approve` | `false` | Approve only a complete, clean review |
@@ -83,7 +88,7 @@ step inside a larger quality job. The complete example is
 The core pattern is:
 
 ```bash
-npm install --global --ignore-scripts @0xcraft/powershot@1.0.0
+npm install --global --ignore-scripts @0xcraft/powershot@1.0.1
 
 STATUS=0
 psh review --verify-only \
