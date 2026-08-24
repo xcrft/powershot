@@ -49,6 +49,8 @@ jobs:
         with:
           fetch-depth: 0
 
+      - run: npm ci --ignore-scripts
+
       - uses: xcrft/powershot@v1
         with:
           verify-only: 'true'
@@ -57,6 +59,11 @@ jobs:
           inline-comments: 'true'
           fail-on-findings: 'true'
 ```
+
+Type-aware checks use the checked-out project's declarations, so install its
+dependencies before PowerShot. Lifecycle scripts are disabled here because pull
+request code is untrusted; use the equivalent safe install for another package
+manager.
 
 Set `upload-sarif: 'false'` and omit `security-events: write` when GitHub code scanning
 is unavailable or the workflow should not publish SARIF.

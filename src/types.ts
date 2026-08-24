@@ -56,7 +56,7 @@ export type Ground = {
   /** syntax-only, holding the base-ref version of each changed file */
   beforeProject: Project
   changed: ChangedFile[]
-  /** `typed` is per file: one outside the tsconfig is readable but has no program */
+  /** `typed` is per file: the tsconfig owns it and its ambient type environment resolved */
   files: { sf: SourceFile; changed: ChangedFile; before?: SourceFile; typed: boolean }[]
   /** normalized name -> where it already lives */
   symbolIndex: Map<string, { file: string; name: string; line: number }[]>

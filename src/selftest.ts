@@ -959,7 +959,9 @@ check('self-review publishes machine findings only for a complete verdict', () =
   const workflow = readFileSync(join(process.cwd(), '.github', 'workflows', 'review.yml'), 'utf8')
   assert.equal(workflow.match(/node "\$PSH" review/g)?.length, 1)
   assert.match(workflow, /name: Check out the untrusted review target[\s\S]+allow-unsafe-pr-checkout: true/)
+  assert.match(workflow, /name: Install the target type environment[\s\S]+working-directory: target[\s\S]+npm ci --ignore-scripts/)
   assert.match(workflow, /steps\.review\.outputs\.status == '0' \|\| steps\.review\.outputs\.status == '1'/)
+  assert.match(workflow, /sarif_file: powershot\.sarif\s+checkout_path: target\s+ref: refs\/pull\/\$\{\{ github\.event\.pull_request\.number \}\}\/head\s+sha: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/)
 })
 check('the public action persists judge answers and publishes only a verdict', () => {
   const action = readFileSync(join(process.cwd(), 'action.yml'), 'utf8')
@@ -979,6 +981,7 @@ check('published CI examples preserve one verdict and its exit status', () => {
   assert.match(action, /upload-sarif: 'true'/)
   assert.match(action, /inline-comments: 'true'/)
   assert.match(action, /runs-on: ubuntu-24\.04/)
+  assert.match(action, /npm ci --ignore-scripts[\s\S]+uses: xcrft\/powershot@v1/)
   assert.match(github, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.0/)
   assert.equal(github.match(/psh review/g)?.length, 1)
   assert.match(github, /--report markdown=powershot\.md[\s\S]+--report sarif=powershot\.sarif/)
@@ -1477,6 +1480,65 @@ check('refuses to run without a tsconfig rather than guessing', () => {
   // would look invented, so the verifier must stay silent instead of inventing findings.
   const g = ground([{ path: 'a.ts', after: 'export const x = totallyUnknownGlobal\n' }])
   assert.equal(phantomApi.run(g).length, 0)
+})
+await checkAsync('an unresolved type environment is partial, not a proven phantom API', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-phantom-api-types-')))
+  try {
+    mkdirSync(join(dir, 'src'))
+    writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({
+      compilerOptions: {
+        target: 'ES2023', module: 'ESNext', moduleResolution: 'Bundler', lib: ['ES2023'], strict: true,
+      },
+      include: ['src'],
+    }))
+    const source = "import { fileURLToPath } from 'node:url'\nexport const here = fileURLToPath(import.meta.url)\n"
+    writeFileSync(join(dir, 'src', 'a.ts'), source)
+
+    const result = await review({
+      root: dir,
+      range: {},
+      changes: [{ path: 'src/a.ts', added: new Set([1, 2]) }],
+      config: loadConfig(dir),
+      verifyOnly: true,
+      checks: ['phantom-api'],
+    })
+
+    assert.deepEqual(result.findings, [])
+    assert.deepEqual(result.plan?.items()[0]?.missing, ['types'])
+    assert.deepEqual(result.skippedChecks, [{ check: 'phantom-api', missing: 'types' }])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+await checkAsync('phantom-api still proves a property error with a complete type environment', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-phantom-api-complete-')))
+  try {
+    mkdirSync(join(dir, 'src'))
+    writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({
+      compilerOptions: {
+        target: 'ES2023', module: 'ESNext', moduleResolution: 'Bundler', lib: ['ES2023'], strict: true,
+      },
+      include: ['src'],
+    }))
+    const source = "export const value = 'ok'.definitelyMissing()\n"
+    writeFileSync(join(dir, 'src', 'a.ts'), source)
+
+    const result = await review({
+      root: dir,
+      range: {},
+      changes: [{ path: 'src/a.ts', added: new Set([1]) }],
+      config: loadConfig(dir),
+      verifyOnly: true,
+      checks: ['phantom-api'],
+    })
+
+    assert.equal(result.findings.length, 1)
+    assert.equal(result.findings[0]?.check, 'phantom-api')
+    assert.equal(result.findings[0]?.confidence, 'proven')
+    assert.deepEqual(result.skippedChecks, [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 console.log('\nhelpers')
