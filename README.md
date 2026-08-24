@@ -211,6 +211,8 @@ The composite action is the shortest setup for GitHub:
   with:
     fetch-depth: 0
 
+- run: npm ci --ignore-scripts
+
 - uses: xcrft/powershot@v1
   with:
     verify-only: 'true'
@@ -219,6 +221,11 @@ The composite action is the shortest setup for GitHub:
     inline-comments: 'true'
     fail-on-findings: 'true'
 ```
+
+Install the checked-out project's dependencies before PowerShot so TypeScript can
+resolve its declared ambient types. The example disables lifecycle scripts because
+pull-request code is untrusted; use the equivalent safe install for another package
+manager.
 
 `@v1` follows compatible `1.x` releases. Pin the action to a full commit SHA in a
 protected required workflow when immutable dependencies are required.

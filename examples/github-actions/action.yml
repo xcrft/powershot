@@ -16,6 +16,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Type-aware checks need the repository's declared types. Keep lifecycle
+      # scripts disabled when pull-request code is not trusted.
+      - run: npm ci --ignore-scripts
+
       - uses: xcrft/powershot@v1
         with:
           verify-only: 'true'

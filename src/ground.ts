@@ -7,6 +7,27 @@ import { packFor, parse } from './lang/packs.js'
 import { insideRepo, isSymlink, repoPath } from './fspolicy.js'
 
 const CODE_EXT = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/
+const MISSING_TYPE_PREFIXES = [
+  'Cannot find global type',
+  'Cannot find global value',
+  'Cannot find module',
+  'Cannot find name',
+  'Cannot find type definition file',
+  'Could not find a declaration file for module',
+]
+
+/**
+ * A property diagnostic is only exact when the file's ambient types resolved.
+ * Missing modules, globals, or declaration files can remove interface
+ * augmentations and manufacture downstream errors such as `ImportMeta.url`.
+ */
+function hasTypeEnvironmentGap(sf: SourceFile): boolean {
+  return sf.getPreEmitDiagnostics().some((diagnostic) => {
+    const message = diagnostic.getMessageText()
+    const head = typeof message === 'string' ? message : message.getMessageText()
+    return MISSING_TYPE_PREFIXES.some((prefix) => head.startsWith(prefix)) || /^File .+ not found/.test(head)
+  })
+}
 
 export function normalizeName(n: string): string {
   return n.toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -113,7 +134,15 @@ export async function buildGround(root: string, changed: ChangedFile[], signal?:
     if (!sf) continue
     const before =
       c.before === undefined ? undefined : beforeProject.createSourceFile(`/before/${c.path}`, c.before, { overwrite: true })
-    files.push({ sf, changed: c, before, typed: typed && owned.has(repoPath(root, c.path)) })
+    const ownedByConfig = typed && owned.has(repoPath(root, c.path))
+    files.push({
+      sf,
+      changed: c,
+      before,
+      // A bound program with unresolved ambient types is not an exact type oracle.
+      // Keep the file reviewable, but make type-dependent checks explicitly partial.
+      typed: ownedByConfig && !hasTypeEnvironmentGap(sf),
+    })
   }
 
   return {
