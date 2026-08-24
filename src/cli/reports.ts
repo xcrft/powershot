@@ -1,11 +1,12 @@
 import { writeFileSync } from 'node:fs'
-import { unavailableCoverage, type RunManifestV1 } from '#app/manifest.js'
+import type { RunManifestV1 } from '#app/manifest.js'
 import type { ReviewResult } from '#app/review.js'
 import { dim } from '#app/report/ansi.js'
 import { codeQuality } from '#app/report/codequality.js'
 import { compact } from '#app/report/compact.js'
 import { markdown } from '#app/report/markdown.js'
 import { sarif } from '#app/report/sarif.js'
+import { summarizeRun } from '#app/report/summary.js'
 import { terminal } from '#app/report/terminal.js'
 
 export const REPORT_FORMATS = ['text', 'compact', 'markdown', 'json', 'sarif', 'codequality', 'manifest'] as const
@@ -44,14 +45,12 @@ export function renderReport(
   if (format === 'codequality') return codeQuality(result.findings)
   if (format === 'sarif') return sarif(result.findings)
   if (format === 'json') return jsonResult(result)
-  if (format === 'markdown') return markdown(result.findings, manifest)
+  const summary = summarizeRun(manifest)
+  if (format === 'markdown') return markdown(result.findings, summary)
   return terminal(result.findings, {
     subtitle: target,
     ...result.stats,
-    state: manifest.state,
-    notLookedAt: manifest.notLookedAt,
-    coverage: manifest.coverage,
-    unavailableCoverage: unavailableCoverage(manifest),
+    ...summary,
   })
 }
 

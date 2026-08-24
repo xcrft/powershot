@@ -1,31 +1,37 @@
 import type { Finding } from '#app/types.js'
+import { modeNote, noFindingsLabel, scopeLine, type ReviewSummary } from './summary.js'
 
 const escape = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-export function viewer(findings: Finding[], meta: {
+export function viewer(findings: Finding[], meta: ReviewSummary & {
   id: string
   target: string
   started: string
-  state: 'complete' | 'partial' | 'failed' | 'unknown'
-  notLookedAt: string[]
-  coverage?: 'full' | 'portable'
-  unavailableCoverage?: string[]
 }): string {
   const verified = findings.filter((f) => f.class === 'verified').length
   const incomplete = meta.state !== 'complete'
-  const portable = !incomplete && meta.coverage === 'portable'
+  const scope = scopeLine(meta)
+  const mode = modeNote(meta)
   const warning = incomplete
     ? '<div class="warning"><strong>This review is ' + escape(meta.state) + ' — not a verdict.</strong>' +
       (meta.notLookedAt.length > 0
         ? '<ul>' + meta.notLookedAt.map((reason) => '<li>' + escape(reason) + '</li>').join('') + '</ul>'
         : '') + '</div>'
     : ''
-  const coverage = portable
-    ? '<div class="coverage"><strong>Portable coverage.</strong> Self-contained oracles ran; enriched semantic depth was unavailable.' +
-      ((meta.unavailableCoverage?.length ?? 0) > 0
-        ? '<ul>' + meta.unavailableCoverage!.map((reason) => '<li>' + escape(reason) + '</li>').join('') + '</ul>'
+  const context = scope || mode || (meta.scopeDetails?.length ?? 0) > 0
+    ? '<div class="coverage">' +
+      (scope ? '<strong>' + escape(scope) + '</strong>' : '') +
+      (mode ? '<p>' + escape(mode) + '</p>' : '') +
+      ((meta.scopeDetails?.length ?? 0) > 0
+        ? '<details><summary>' + (meta.coverage === 'portable' ? 'Coverage details' : 'Review scope') + '</summary><ul>' +
+          meta.scopeDetails!.map((detail) => '<li>' + escape(detail) + '</li>').join('') +
+          '</ul></details>'
         : '') + '</div>'
+    : ''
+  const verdict = findings.length === 0
+    ? '<p class="none">' +
+      (incomplete ? 'No findings from what completed.' : escape(noFindingsLabel(meta)) + '.') + '</p>'
     : ''
   const rows = findings
     .map((f) => {
@@ -104,16 +110,15 @@ export function viewer(findings: Finding[], meta: {
   <p class="meta">${escape(meta.target)} · ${escape(meta.started.slice(0, 19).replace('T', ' '))} · session ${escape(meta.id)}<br>
     ${findings.length} finding(s) — ${verified} verified, ${findings.length - verified} judged</p>
   ${warning}
-  ${coverage}
+  ${verdict}
+  ${context}
   <div class="bar">
     <button data-filter="all" aria-pressed="true">all</button>
     <button data-filter="verified" aria-pressed="false">verified</button>
     <button data-filter="judged" aria-pressed="false">judged</button>
     <button id="show-away" aria-pressed="false">show put away</button>
   </div>
-  ${findings.length === 0
-    ? '<p class="none">' + (incomplete ? 'No findings from what completed.' : portable ? 'No findings in portable coverage.' : 'No findings.') + '</p>'
-    : rows}
+  ${findings.length === 0 ? '' : rows}
 </div>
 <script>
   // Putting a finding away is per-reader and per-browser on purpose: this page is a

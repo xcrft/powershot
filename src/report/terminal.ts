@@ -1,6 +1,7 @@
 import type { Finding, Severity } from '#app/types.js'
 import { bold, brightRed, dim, gray, red, steel, yellow } from './ansi.js'
 import { highlight, isJsx } from './highlight.js'
+import { modeNote, noFindingsLabel, scopeLine, type ReviewSummary } from './summary.js'
 
 const SEVERITY_COLOR: Record<Severity, (s: string) => string> = {
   critical: brightRed,
@@ -104,17 +105,11 @@ function severityCounts(findings: Finding[]): string {
     .join(dim(' · '))
 }
 
-export type TerminalOptions = {
+export type TerminalOptions = ReviewSummary & {
   /** what was reviewed, e.g. "workspace" or "main...feat/x" */
   subtitle: string
   verified: number
   judged: number
-  state: 'complete' | 'partial' | 'failed'
-  /** authoritative manifest reasons why a partial or failed run is not a verdict */
-  notLookedAt: string[]
-  coverage?: 'full' | 'portable'
-  /** Optional semantic depth that did not block this portable verdict. */
-  unavailableCoverage?: string[]
 }
 
 /**
@@ -131,19 +126,22 @@ export function terminal(findings: Finding[], opts: TerminalOptions): string {
   out.push(rule)
 
   const incomplete = opts.state !== 'complete'
-  const portable = !incomplete && opts.coverage === 'portable'
+  const scope = scopeLine(opts)
+  const mode = modeNote(opts)
 
   if (findings.length === 0) {
     out.push(
       '',
       incomplete
         ? ' ' + yellow('!') + '  No findings — but this review is ' + opts.state + ', not a verdict.'
-        : ' ' + steel('✔') + (portable ? '  No findings in portable coverage.' : '  No findings.'),
+        : ' ' + steel('✔') + '  ' + noFindingsLabel(opts) + '.',
     )
     for (const reason of opts.notLookedAt) out.push(dim('    ' + reason))
-    if (portable) {
-      out.push(dim('    Portable coverage: self-contained oracles ran; enriched semantic depth was unavailable.'))
-      for (const reason of opts.unavailableCoverage ?? []) out.push(dim('    ' + reason))
+    if (scope) out.push(dim('    ' + scope))
+    if (mode) out.push(dim('    ' + mode))
+    if ((opts.scopeDetails?.length ?? 0) > 0) {
+      out.push(dim('    ' + (opts.coverage === 'portable' ? 'Coverage details:' : 'Review scope:')))
+      for (const detail of opts.scopeDetails!) out.push(dim('      - ' + detail))
     }
     out.push('')
     return out.join('\n')
@@ -183,10 +181,10 @@ export function terminal(findings: Finding[], opts: TerminalOptions): string {
     out.push('')
     out.push(' ' + yellow('! this review is ' + opts.state + ' — findings may be missing'))
     for (const reason of opts.notLookedAt) out.push(dim('   ' + reason))
-  } else if (portable) {
-    out.push(' ' + steel('◇ portable coverage') + dim(' · enriched semantic depth was unavailable'))
-    for (const reason of opts.unavailableCoverage ?? []) out.push(dim('   ' + reason))
   }
+  if (scope) out.push(' ' + steel('◇ ') + dim(scope))
+  if (mode) out.push(dim('   ' + mode))
+  for (const detail of opts.scopeDetails ?? []) out.push(dim('   ' + detail))
   out.push('')
   return out.join('\n')
 }

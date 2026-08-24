@@ -89,6 +89,12 @@ never patches or retires the current head's comment. The first scoped run replac
 newest unmarked legacy `## PowerShot` summary from v1.1.2 or older without claiming the
 ambiguous legacy comment through `PATCH`.
 
+The comment leads with the verdict, effective severity threshold, review mode, and
+aggregate file/check counts. Portable gaps and files outside parser coverage stay
+visible under a collapsed coverage section without filling the timeline with paths.
+The generated `powershot.manifest.json` keeps the per-file accounting for workflows
+that want to persist it as an artifact.
+
 PowerShot checks the target head throughout reconciliation and removes its own
 just-created candidate if it observes a changed head. Simultaneous same-head runs
 relist and converge on one scoped candidate when they complete. Keep the example's

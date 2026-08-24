@@ -5,11 +5,12 @@ import { loadConfig, policyChanged } from '#app/config.js'
 import { absorbDelegated, delegateBrief } from '#app/delegate.js'
 import { baseRefOf, checkRange, headSha, repoRoot, shaOf } from '#app/git.js'
 import { JUDGES } from '#app/judges/prompts.js'
-import { RunManifest, coverageProblems, hashOf, unavailableCoverage, writeManifest } from '#app/manifest.js'
+import { RunManifest, coverageProblems, hashOf, writeManifest } from '#app/manifest.js'
 import { Trace } from '#app/otel.js'
 import { PACKAGE_VERSION } from '#app/package-meta.js'
 import { dim, yellow } from '#app/report/ansi.js'
 import { progress, stage } from '#app/report/terminal.js'
+import { summarizeRun } from '#app/report/summary.js'
 import { review } from '#app/review.js'
 import { scanPaths } from '#app/scan.js'
 import { Session } from '#app/session.js'
@@ -253,6 +254,7 @@ export async function runReviewCommand(
       model: config.model,
       tools: values.tools,
       verifyOnly: values['verify-only'],
+      minSeverity: config.minSeverity,
     },
     files: result.plan?.items() ?? [],
     skippedChecks: result.skippedChecks ?? [],
@@ -279,12 +281,7 @@ export async function runReviewCommand(
     record.notLookedAt.push(failure)
     process.stderr.write(yellow(' ◇ manifest') + dim(' ' + gaps.join('; ')) + '\n')
   }
-  session?.saveReport(result.findings, {
-    state: record.state,
-    notLookedAt: record.notLookedAt,
-    coverage: record.coverage,
-    unavailableCoverage: unavailableCoverage(record),
-  })
+  session?.saveReport(result.findings, summarizeRun(record))
   writeManifest(root, record)
 
   publishReports({

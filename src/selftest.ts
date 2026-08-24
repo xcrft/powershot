@@ -49,6 +49,7 @@ import { compact } from './report/compact.js'
 import { apiKey } from './judges/llm.js'
 import { sarif } from './report/sarif.js'
 import { markdown } from './report/markdown.js'
+import { summarizeRun } from './report/summary.js'
 import { wrap } from './report/terminal.js'
 import { highlight, isJsx } from './report/highlight.js'
 import { buildGround, normalizeName, readEnvManifest, relPath } from './ground.js'
@@ -630,31 +631,66 @@ check('a review that did not complete never renders as clean', () => {
   })
   assert.match(partial, /partial, not a verdict/)
   assert.match(partial, /outside\.ts \(no types\)/)
+
+  const partialMarkdown = markdown([], {
+    state: 'partial', notLookedAt: ['outside.ts (no types)'],
+    verifyOnly: true, minSeverity: 'medium', filesReviewed: 4, deterministicChecks: 7,
+  })
+  assert.match(partialMarkdown, /This review is partial — not a verdict/)
+  assert.match(partialMarkdown, /<summary>Why this is not a verdict<\/summary>/)
+  assert.match(partialMarkdown, /4 files reviewed · 7 deterministic checks/)
+  assert.doesNotMatch(partialMarkdown.slice(0, partialMarkdown.indexOf('<details>')), /outside\\?\.ts/)
+  assert.match(partialMarkdown.replace(/\\/g, ''), /outside\.ts \(no types\)/)
 })
 check('portable coverage is a verdict, but never masquerades as full semantic coverage', () => {
   const unavailable = [
-    '1 file(s) without enriched semantic coverage: web/app.ts (types, references)',
-    '2 enriched check(s) unavailable: phantom-api (no types), contract-drift (no references)',
+    '1 reviewed file lacked type information and a reference graph',
+    '2 checks requiring type information or a reference graph did not run: phantom-api, contract-drift',
   ]
   const out = terminal([], {
     subtitle: 'workspace', verified: 0, judged: 0, state: 'complete', notLookedAt: [],
-    coverage: 'portable', unavailableCoverage: unavailable,
+    coverage: 'portable', verifyOnly: true, minSeverity: 'medium',
+    filesReviewed: 1, deterministicChecks: 1, scopeDetails: unavailable,
   })
-  assert.match(out, /No findings in portable coverage\./)
-  assert.match(out, /web\/app\.ts \(types, references\)/)
+  assert.match(out, /No medium-or-higher deterministic findings\./)
+  assert.match(out, /1 file reviewed · 1 deterministic check · portable coverage/)
+  assert.match(out, /1 reviewed file lacked type information and a reference graph/)
   assert.doesNotMatch(out, /not a verdict/)
 
-  const md = markdown([], {
+  const selected = Array.from({ length: 20 }, (_, index) => ({
+    path: 'web/file-' + index + '.ts',
+    disposition: 'selected' as const,
+    unavailable: index < 11 ? ['types' as const, 'references' as const] : undefined,
+  }))
+  const waived = Array.from({ length: 16 }, (_, index) => ({
+    path: 'assets/file-' + index + '.json',
+    disposition: 'waived' as const,
+    reason: 'no parser',
+  }))
+  const md = markdown([], summarizeRun({
     state: 'complete', notLookedAt: [], coverage: 'portable',
-    files: [{ path: 'web/app.ts', unavailable: ['types', 'references'] }],
-    checks: { unavailable: [
-      { check: 'phantom-api', missing: 'types' },
-      { check: 'contract-drift', missing: 'references' },
-    ] },
-  })
-  assert.match(md, /\*\*Portable coverage\.\*\*/)
-  assert.match(md, /No findings in portable coverage\./)
-  assert.doesNotMatch(md, /^No findings\.$/m)
+    engine: { verifyOnly: true, minSeverity: 'medium' },
+    files: [...selected, ...waived],
+    checks: {
+      ran: Array.from({ length: 19 }, (_, index) => 'check-' + index),
+      unavailable: [
+        { check: 'phantom-api', missing: 'types' },
+        { check: 'contract-drift', missing: 'references' },
+        { check: 'dead-on-arrival', missing: 'references' },
+      ],
+    },
+  }))
+  assert.match(md, /✅ \*\*No medium-or-higher deterministic findings\*\*/)
+  assert.match(md, /20 files reviewed · 19 deterministic checks · portable coverage/)
+  assert.match(md, /Model review was disabled \(`verify-only`\)\./)
+  assert.match(md, /<summary>Coverage details<\/summary>/)
+  const rendered = md.replace(/\\/g, '')
+  assert.match(rendered, /11 reviewed files? lacked type information and a reference graph/)
+  assert.match(rendered, /3 checks? requiring type information or a reference graph did not run: phantom-api, contract-drift, dead-on-arrival/)
+  assert.match(rendered, /16 changed files? not reviewed: no parser/)
+  assert.ok(md.indexOf('No medium-or-higher deterministic findings') < md.indexOf('Coverage details'))
+  assert.doesNotMatch(md, /web\/file-|assets\/file-/)
+  assert.doesNotMatch(md, /No findings in portable coverage\./)
 })
 check('findings are still shown when a stage failed, with the warning kept', () => {
   const f: Finding = { id: 'F1', class: 'verified', check: 'phantom-dep', severity: 'high',
@@ -1504,10 +1540,12 @@ check('the viewer labels a complete portable session', () => {
   const html = viewer([], {
     id: 'portable', target: 'workspace', started: '2026-01-01T10:00:00Z',
     state: 'complete', notLookedAt: [], coverage: 'portable',
-    unavailableCoverage: ['1 file(s) without enriched semantic coverage: app.ts (types)'],
+    verifyOnly: true, minSeverity: 'medium', filesReviewed: 1, deterministicChecks: 2,
+    scopeDetails: ['1 reviewed file lacked type information'],
   })
-  assert.match(html, /Portable coverage\./)
-  assert.match(html, /No findings in portable coverage\./)
+  assert.match(html, /1 file reviewed · 2 deterministic checks · portable coverage/)
+  assert.match(html, /No medium-or-higher deterministic findings\./)
+  assert.match(html, /<summary>Coverage details<\/summary>/)
 })
 check('the viewer escapes content rather than rendering it', () => {
   const nasty: Finding[] = [{ ...sample[0]!, title: '<img src=x onerror=alert(1)>' }]

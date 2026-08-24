@@ -206,8 +206,9 @@ flowchart LR
 | `2` | Command or Git input was invalid |
 | `3` | Review is incomplete; findings may be missing |
 
-“No findings in portable coverage”, “No findings”, and “PowerShot could not look” are
-intentionally different outcomes. Use `--format manifest` to inspect `coverage`, file
+A clean report names its effective severity threshold, deterministic/model mode, file
+and check counts, and coverage level. A partial or failed review instead says it is not
+a verdict and keeps the missing work visible. Use `--format manifest` to inspect file
 dispositions, executed and unavailable checks, failures, judge units, and
 `notLookedAt`.
 

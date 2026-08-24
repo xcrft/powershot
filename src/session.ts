@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import type { Finding } from './types.js'
+import type { ReviewSummary } from './report/summary.js'
 
 const DIR = '.powershot/sessions'
 
@@ -42,7 +43,11 @@ type Stored = {
     state?: 'complete' | 'partial' | 'failed'
     notLookedAt?: string[]
     coverage?: 'full' | 'portable'
-    unavailableCoverage?: string[]
+    verifyOnly?: ReviewSummary['verifyOnly']
+    minSeverity?: ReviewSummary['minSeverity']
+    filesReviewed?: number
+    deterministicChecks?: number
+    scopeDetails?: string[]
   }
 }
 
@@ -127,21 +132,20 @@ export class Session {
 
   saveReport(
     findings: Finding[],
-    verdict: {
-      state: 'complete' | 'partial' | 'failed'
-      notLookedAt: string[]
-      coverage?: 'full' | 'portable'
-      unavailableCoverage?: string[]
-    },
+    verdict: ReviewSummary<'complete' | 'partial' | 'failed'>,
   ): void {
     this.data.report = {
       findings,
       verified: findings.filter((f) => f.class === 'verified').length,
       judged: findings.filter((f) => f.class === 'judged').length,
       state: verdict.state,
-      notLookedAt: verdict.notLookedAt,
+      notLookedAt: [...verdict.notLookedAt],
       coverage: verdict.coverage,
-      unavailableCoverage: verdict.unavailableCoverage,
+      verifyOnly: verdict.verifyOnly,
+      minSeverity: verdict.minSeverity,
+      filesReviewed: verdict.filesReviewed,
+      deterministicChecks: verdict.deterministicChecks,
+      scopeDetails: verdict.scopeDetails ? [...verdict.scopeDetails] : undefined,
     }
     this.save()
   }

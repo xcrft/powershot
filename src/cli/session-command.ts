@@ -46,7 +46,11 @@ export function runSessionCommand(positionals: string[]): number {
       state: session.report.state ?? 'unknown',
       notLookedAt: session.report.notLookedAt ?? ['session predates verdict recording'],
       coverage: session.report.coverage,
-      unavailableCoverage: session.report.unavailableCoverage,
+      verifyOnly: session.report.verifyOnly,
+      minSeverity: session.report.minSeverity,
+      filesReviewed: session.report.filesReviewed,
+      deterministicChecks: session.report.deterministicChecks,
+      scopeDetails: session.report.scopeDetails,
     }))
     process.stdout.write(output + '\n')
     return 0
