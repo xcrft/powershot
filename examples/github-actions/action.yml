@@ -19,5 +19,6 @@ jobs:
       - uses: xcrft/powershot@v1
         with:
           verify-only: 'true'
+          upload-sarif: 'true'
           comment: 'true'
           fail-on-findings: 'true'

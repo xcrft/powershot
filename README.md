@@ -214,6 +214,7 @@ The composite action is the shortest setup for GitHub:
 - uses: xcrft/powershot@v1
   with:
     verify-only: 'true'
+    upload-sarif: 'true'
     comment: 'true'
     fail-on-findings: 'true'
 ```
