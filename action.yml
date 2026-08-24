@@ -33,9 +33,9 @@ inputs:
     default: 'false'
   approve:
     description: >
-      Approve the pull request when the review is clean. Off by default on purpose:
-      an approval is a human signal, and a tool that grants one silently is a tool
-      that can wave through what it was never able to look at.
+      Approve the pull request only when the review is clean and coverage is full.
+      Off by default on purpose: an approval is a human signal, and a tool that
+      grants one silently is a tool that can wave through optional semantic depth.
     default: 'false'
 
 outputs:
@@ -45,6 +45,9 @@ outputs:
   complete:
     description: true only when the review reached a complete verdict
     value: ${{ steps.review.outputs.complete }}
+  coverage:
+    description: full when every applicable oracle ran; portable when enriched semantic oracles were unavailable
+    value: ${{ steps.review.outputs.coverage }}
 
 runs:
   using: composite
@@ -103,7 +106,8 @@ runs:
         node "$PSH" review "${ARGS[@]}" \
           --report sarif=powershot.sarif \
           --report markdown=powershot.md \
-          --report json=powershot.json > /dev/null || STATUS=$?
+          --report json=powershot.json \
+          --report manifest=powershot.manifest.json > /dev/null || STATUS=$?
 
         # Only 0 (clean) and 1 (findings) are verdicts. 3 is an incomplete review,
         # 2 is bad usage and 130 is an interrupt — none of the three looked at the
@@ -119,8 +123,14 @@ runs:
           echo "::error::PowerShot produced no readable report"
           COUNT=0; COMPLETE=false
         fi
+        COVERAGE=$(node -e 'const fs=require("fs");try{const m=JSON.parse(fs.readFileSync("powershot.manifest.json","utf8"));console.log(m.coverage === "full" || m.coverage === "portable" ? m.coverage : "unknown")}catch{console.log("unknown")}')
+        if [ "$COVERAGE" = "unknown" ]; then
+          echo "::error::PowerShot produced no readable run manifest"
+          COMPLETE=false
+        fi
         echo "findings=$COUNT" >> "$GITHUB_OUTPUT"
         echo "complete=$COMPLETE" >> "$GITHUB_OUTPUT"
+        echo "coverage=$COVERAGE" >> "$GITHUB_OUTPUT"
         if [ -f powershot.md ]; then
           cat powershot.md >> "$GITHUB_STEP_SUMMARY"
         else
@@ -168,7 +178,7 @@ runs:
     - name: Approve a clean review
       # only on a completed, genuinely empty review — an incomplete run must never
       # approve, since "we found nothing" and "we could not look" are different
-      if: inputs.approve == 'true' && github.event_name == 'pull_request' && steps.review.outputs.findings == '0' && steps.review.outputs.complete == 'true'
+      if: inputs.approve == 'true' && github.event_name == 'pull_request' && steps.review.outputs.findings == '0' && steps.review.outputs.complete == 'true' && steps.review.outputs.coverage == 'full'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}

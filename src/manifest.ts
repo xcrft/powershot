@@ -32,7 +32,14 @@ export type RunManifestV1 = {
   engine: { version: string; provider?: string; model?: string; tools: boolean; verifyOnly: boolean }
   files: PlanItem[]
   units: UnitRecord[]
-  checks: { ran: string[]; skipped: { check: string; missing: string }[] }
+  checks: {
+    ran: string[]
+    skipped: { check: string; missing: string }[]
+    /** Enriched checks not promised by portable coverage. */
+    unavailable?: { check: string; missing: string }[]
+  }
+  /** `full` means every applicable configured oracle was available. */
+  coverage?: 'full' | 'portable'
   findings: { total: number; verified: number; judged: number; dismissed: number; droppedPosition: number }
   usage: Usage
   /**
@@ -54,6 +61,34 @@ export type CompletionParts = {
   failures: string[]
   cancelled?: boolean
   budgetStop?: string
+}
+
+type CoverageRecord = {
+  coverage?: 'full' | 'portable'
+  files?: { path: string; unavailable?: string[] }[]
+  checks?: { unavailable?: { check: string; missing: string }[] }
+}
+
+/** Human-readable optional depth, kept separate from verdict-blocking notLookedAt. */
+export function unavailableCoverage(record: CoverageRecord): string[] {
+  const out: string[] = []
+  const files = (record.files ?? []).filter((file) => file.unavailable?.length)
+  if (files.length > 0) {
+    out.push(
+      files.length + ' file(s) without enriched semantic coverage: ' +
+      files.slice(0, 5).map((file) => file.path + ' (' + file.unavailable!.join(', ') + ')').join(', ') +
+      (files.length > 5 ? ', …' : ''),
+    )
+  }
+  const checks = record.checks?.unavailable ?? []
+  if (checks.length > 0) {
+    out.push(
+      checks.length + ' enriched check(s) unavailable: ' +
+      checks.slice(0, 8).map((check) => check.check + ' (no ' + check.missing + ')').join(', ') +
+      (checks.length > 8 ? ', …' : ''),
+    )
+  }
+  return out
 }
 
 /** The single state machine behind manifests, benches, renderers and exit codes. */
@@ -118,6 +153,7 @@ export class RunManifest {
     engine: RunManifestV1['engine']
     files: PlanItem[]
     skippedChecks: { check: string; missing: string }[]
+    unavailableChecks?: { check: string; missing: string }[]
     findings: RunManifestV1['findings']
     usage: Usage
     failures: string[]
@@ -147,12 +183,20 @@ export class RunManifest {
         ...file,
         checks: [...file.checks],
         missing: file.missing ? [...file.missing] : undefined,
+        unavailable: file.unavailable ? [...file.unavailable] : undefined,
       })),
       units: this.units.map((unit) => ({ ...unit })),
       checks: {
         ran: [...this.ranChecks],
         skipped: parts.skippedChecks.map((check) => ({ ...check })),
+        ...((parts.unavailableChecks?.length ?? 0) > 0
+          ? { unavailable: parts.unavailableChecks!.map((check) => ({ ...check })) }
+          : {}),
       },
+      coverage: parts.files.some((file) => file.missing?.length || file.unavailable?.length) ||
+        parts.skippedChecks.length > 0 || (parts.unavailableChecks?.length ?? 0) > 0
+        ? 'portable'
+        : 'full',
       findings: { ...parts.findings },
       usage: { ...parts.usage },
       state: completion.state,
@@ -209,6 +253,15 @@ export function coverageProblems(m: RunManifestV1): string[] {
     if (f.disposition !== 'selected' && f.checks.length > 0) {
       problems.push(f.path + ': ' + f.disposition + ' file received checks')
     }
+    if (f.disposition !== 'selected' && f.unavailable?.length) {
+      problems.push(f.path + ': ' + f.disposition + ' file has unavailable coverage')
+    }
+    const missingCaps = new Set(f.missing ?? [])
+    for (const capability of f.unavailable ?? []) {
+      if (missingCaps.has(capability)) {
+        problems.push(f.path + ': capability is both required and unavailable: ' + capability)
+      }
+    }
     const local = new Set<string>()
     for (const check of f.checks) {
       if (local.has(check)) problems.push(f.path + ': received check twice: ' + check)
@@ -241,6 +294,20 @@ export function coverageProblems(m: RunManifestV1): string[] {
     if (skipped.has(check.check)) problems.push('check counted twice as skipped: ' + check.check)
     skipped.add(check.check)
     if (ran.has(check.check)) problems.push('check counted as both ran and skipped: ' + check.check)
+  }
+  const unavailable = new Set<string>()
+  for (const check of m.checks.unavailable ?? []) {
+    if (unavailable.has(check.check)) problems.push('check counted twice as unavailable: ' + check.check)
+    unavailable.add(check.check)
+    if (skipped.has(check.check)) problems.push('check counted as both skipped and unavailable: ' + check.check)
+  }
+
+  const expectedCoverage = m.files.some((file) => file.missing?.length || file.unavailable?.length) ||
+    m.checks.skipped.length > 0 || (m.checks.unavailable?.length ?? 0) > 0
+    ? 'portable'
+    : 'full'
+  if (m.coverage !== undefined && m.coverage !== expectedCoverage) {
+    problems.push('coverage is ' + m.coverage + ' but accounting says ' + expectedCoverage)
   }
 
   // a judged run that reports complete must have reached every unit it selected

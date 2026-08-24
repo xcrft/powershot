@@ -3,6 +3,7 @@
   "model": "claude-sonnet-5",
   "verifiers": { "enable": ["*"] },
   "judges": { "enable": ["plausible-logic"] },
+  "coverage": "portable",
   "minSeverity": "low",
   "ignore": ["**/node_modules/**", "**/dist/**", "**/*.generated.*"]
 }

@@ -1,4 +1,5 @@
 import type { Finding } from '#app/types.js'
+import { unavailableCoverage } from '#app/manifest.js'
 
 const MARK: Record<string, string> = { verified: '▣', judged: '▚' }
 
@@ -59,7 +60,13 @@ function group(findings: Finding[]): Map<string, Finding[]> {
   return out
 }
 
-export function markdown(findings: Finding[], run?: { state: string; notLookedAt: string[] }): string {
+export function markdown(findings: Finding[], run?: {
+  state: string
+  notLookedAt: string[]
+  coverage?: 'full' | 'portable'
+  files?: { path: string; unavailable?: string[] }[]
+  checks?: { unavailable?: { check: string; missing: string }[] }
+}): string {
   // "No findings" from a run that could not look is the one thing this must never
   // say on its own — the reader takes a comment at face value, and a red job beside
   // a green comment is read as a flaky job
@@ -72,15 +79,30 @@ export function markdown(findings: Finding[], run?: { state: string; notLookedAt
         '',
       ]
     : []
+  const portable = run?.state === 'complete' && run.coverage === 'portable'
+  const coverage = portable
+    ? [
+        '> [!NOTE]',
+        '> **Portable coverage.** Self-contained oracles ran; enriched semantic depth was unavailable:',
+        ...unavailableCoverage(run).map((reason) => '> - ' + text(reason)),
+        '',
+      ]
+    : []
 
   if (findings.length === 0) {
-    return ['## PowerShot', '', ...banner, incomplete ? 'No findings *from what it managed to review*.' : 'No findings.', ''].join('\n')
+    return [
+      '## PowerShot', '', ...banner, ...coverage,
+      incomplete
+        ? 'No findings *from what it managed to review*.'
+        : portable ? 'No findings in portable coverage.' : 'No findings.',
+      '',
+    ].join('\n')
   }
 
   const verified = findings.filter((f) => f.class === 'verified').length
   const judged = findings.length - verified
 
-  const out: string[] = ['## PowerShot', '', ...banner]
+  const out: string[] = ['## PowerShot', '', ...banner, ...coverage]
   out.push('**' + verified + ' verified** (deterministic, 0 tokens) · **' + judged + ' judged** (agent)', '')
 
   for (const [file, list] of group(findings)) {

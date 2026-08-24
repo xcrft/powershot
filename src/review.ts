@@ -3,7 +3,6 @@ import type { Capability, ForeignFile, Ground, Verifier } from './types.js'
 import { baseRefOf, collectChanges, statedIntent, type Range } from './git.js'
 import { bundle, bundleName, reviewables, uncovered } from './bundle.js'
 import { attachFrames, positionable } from './position.js'
-import { skippedLanguages } from './lang/packs.js'
 import type { Session } from './session.js'
 import { JudgeCache } from './cache.js'
 import { Dismissals, rememberReport } from './dismissed.js'
@@ -56,6 +55,8 @@ export type ReviewResult = {
   plan?: SelectionPlan
   /** checks that were asked for and could not run, with what was missing */
   skippedChecks?: { check: string; missing: string }[]
+  /** enriched checks unavailable under portable coverage */
+  unavailableChecks?: { check: string; missing: string }[]
   usage?: Usage
   /** set when a limit stopped the run before it reached every unit */
   budgetStop?: string
@@ -64,8 +65,6 @@ export type ReviewResult = {
   /** "no findings" and "we could not look" must not be the same answer. */
   failures: string[]
 }
-
-const packOf = (path: string): string => packFor(path)?.name ?? 'other'
 
 export function atLeast(severity: Severity, min: Severity): boolean {
   return SEVERITIES.indexOf(severity) >= SEVERITIES.indexOf(min)
@@ -88,20 +87,24 @@ type VerifierTarget =
   | { kind: 'typescript'; path: string; file: NativeFile; missing: Capability[] }
   | { kind: 'foreign'; path: string; file: ForeignFile; missing: Capability[] }
 
+const PORTABLE_OPTIONAL = new Set<Capability>(['types', 'references', 'python-types'])
+
 /**
  * Files this verifier can actually answer for, with unavailable oracles kept per
- * file. `base` is applicability rather than a missing capability: a before/after
- * check has no question to ask about a newly created file.
+ * file. A before/after check has no question to ask about a newly created file;
+ * when an existing file has a base snapshot that cannot be parsed, `base` is a real
+ * missing capability and remains verdict-blocking in every coverage profile.
  */
 function verifierTargets(v: Verifier, g: Ground, have: Set<Capability>): VerifierTarget[] {
   if (v.domain === 'typescript') {
     return g.files
-      .filter((file) => !v.needs.includes('base') || file.before !== undefined)
+      .filter((file) => !v.needs.includes('base') || file.changed.before !== undefined)
       .map((file) => ({
         kind: 'typescript' as const,
         path: file.changed.path,
         file,
         missing: v.needs.filter((need) => {
+          if (need === 'base') return file.before === undefined
           if (need === 'types' || need === 'references') return !file.typed
           if (need === 'python-types') return true
           return false
@@ -113,12 +116,13 @@ function verifierTargets(v: Verifier, g: Ground, have: Set<Capability>): Verifie
     return g.foreign
       .filter((file) => v.domain !== 'python' || file.pack.name === 'python')
       .filter((file) => !v.supports || v.supports(file))
-      .filter((file) => !v.needs.includes('base') || file.beforeTree !== undefined)
+      .filter((file) => !v.needs.includes('base') || file.changed.before !== undefined)
       .map((file) => ({
         kind: 'foreign' as const,
         path: file.path,
         file,
         missing: v.needs.filter((need) => {
+          if (need === 'base') return file.beforeTree === undefined
           if (need === 'python-types') return file.pack.name !== 'python' || !have.has('python-types')
           if (need === 'types' || need === 'references') return true
           return false
@@ -204,6 +208,7 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
   }
 
   const skipped = new Map<string, string>()
+  const unavailable = new Map<string, string>()
   const budget = opts.budget ?? new Budget()
   const manifest = opts.manifest
   const groundDone = stage('ground')
@@ -229,28 +234,30 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
     if (files.length > 0) targets.set(verifier, files)
   }
   const selectedVerifiers = [...targets.keys()]
+  // Naming a check explicitly is a request for that oracle, even under the portable
+  // default. Strict policy makes the same promise for every configured verifier.
+  const requireEnrichedOracles = config.coverage === 'strict' || opts.checks !== undefined
 
   // a file the change touched that no parser produced a tree for was not reviewed,
   // whatever the summary says about the ones that were
   const grounded = new Set([...g.files.map((f) => f.changed.path), ...g.foreign.map((f) => f.path)])
   for (const c of changed) {
-    if (!grounded.has(c.path)) plan.waive(c.path, 'no parser for this language')
+    if (grounded.has(c.path)) continue
+    if (packFor(c.path)) plan.fail(c.path, 'declared language parser unavailable')
+    else plan.waive(c.path, 'no parser for this language')
   }
   // Capabilities belong to files, not runs. A typed file beside one excluded from
   // tsconfig must not make the latter look checked, and an old Ruby file must not
   // make a new Python file eligible for a before/after oracle.
   for (const files of targets.values()) {
-    for (const file of files) plan.limit(file.path, file.missing)
-  }
-  if (skippedLanguages.length > 0) {
-    for (const c of changed) {
-      if (!grounded.has(c.path) && skippedLanguages.includes(packOf(c.path))) {
-        plan.fail(c.path, 'grammar budget reached')
-      }
+    for (const file of files) {
+      const required = file.missing.filter((capability) => !PORTABLE_OPTIONAL.has(capability))
+      const enriched = file.missing.filter((capability) => PORTABLE_OPTIONAL.has(capability))
+      plan.limit(file.path, required)
+      if (requireEnrichedOracles) plan.limit(file.path, enriched)
+      else plan.noteUnavailable(file.path, enriched)
     }
-    failures.push('not reviewed, grammar budget reached: ' + skippedLanguages.join(', '))
   }
-
   for (const line of plan.summary()) say('selection ' + line)
   for (const f of plan.of('failed')) failures.push('not reviewed: ' + f.path + ' — ' + f.reason)
 
@@ -263,8 +270,13 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
     const files = targets.get(v)!
     const eligible = files.filter((file) => file.missing.length === 0)
     const missing = [...new Set(files.flatMap((file) => file.missing))]
+    const check = v.id ?? v.name
+    const onlyEnrichedMissing = missing.every((capability) => PORTABLE_OPTIONAL.has(capability))
+    if (missing.length > 0 && !requireEnrichedOracles && onlyEnrichedMissing) {
+      unavailable.set(check, missing.join(', '))
+    }
     if (missing.length > 0 && eligible.length === 0) {
-      skipped.set(v.id ?? v.name, missing.join(', '))
+      if (requireEnrichedOracles || !onlyEnrichedMissing) skipped.set(check, missing.join(', '))
       continue
     }
     // a scan spends most of its time here, so Ctrl-C has to reach this half
@@ -273,7 +285,6 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
       break
     }
     ran++
-    const check = v.id ?? v.name
     manifest?.ran(check)
     for (const file of eligible) plan.checked(file.path, check)
     try {
@@ -286,6 +297,10 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
   if (skipped.size > 0) {
     const names = [...skipped].map(([n, why]) => n + ' (no ' + why + ')')
     say('skipped   ' + names.join(', '))
+  }
+  if (unavailable.size > 0) {
+    const names = [...unavailable].map(([n, why]) => n + ' (no ' + why + ')')
+    say('coverage  portable · enriched checks unavailable: ' + names.join(', '))
   }
 
   // --checks overrides the config rather than filtering it
@@ -416,6 +431,7 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
     failures,
     plan,
     skippedChecks: [...skipped].map(([check, missing]) => ({ check, missing })),
+    unavailableChecks: [...unavailable].map(([check, missing]) => ({ check, missing })),
     usage: budget.finish(),
     budgetStop,
     cancelled: opts.signal?.aborted ?? false,

@@ -50,13 +50,18 @@ function pythonFindings(g: Ground): Finding[] {
     const python = g.foreign.filter((f) => f.pack.name === 'python')
     if (python.length === 0) return []
 
-    const local = localModules(g.root)
-
     const findings: Finding[] = []
+    const modules = new Map<string, Set<string>>()
     for (const file of python) {
       // the manifests governing this file, not just the repository's own
-      const manifest = pythonManifest(g.root, dirname(join(g.root, file.path)))
+      const fileDir = dirname(join(g.root, file.path))
+      const manifest = pythonManifest(g.root, fileDir)
       if (!manifest) continue
+      let local = modules.get(fileDir)
+      if (!local) {
+        local = localModules(g.root, fileDir)
+        modules.set(fileDir, local)
+      }
 
       for (const imported of file.pack.imports?.(file.tree.rootNode) ?? []) {
         const line = imported.node.startPosition.row + 1

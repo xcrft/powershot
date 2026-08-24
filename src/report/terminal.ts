@@ -112,6 +112,9 @@ export type TerminalOptions = {
   state: 'complete' | 'partial' | 'failed'
   /** authoritative manifest reasons why a partial or failed run is not a verdict */
   notLookedAt: string[]
+  coverage?: 'full' | 'portable'
+  /** Optional semantic depth that did not block this portable verdict. */
+  unavailableCoverage?: string[]
 }
 
 /**
@@ -128,15 +131,20 @@ export function terminal(findings: Finding[], opts: TerminalOptions): string {
   out.push(rule)
 
   const incomplete = opts.state !== 'complete'
+  const portable = !incomplete && opts.coverage === 'portable'
 
   if (findings.length === 0) {
     out.push(
       '',
       incomplete
         ? ' ' + yellow('!') + '  No findings — but this review is ' + opts.state + ', not a verdict.'
-        : ' ' + steel('✔') + '  No findings.',
+        : ' ' + steel('✔') + (portable ? '  No findings in portable coverage.' : '  No findings.'),
     )
     for (const reason of opts.notLookedAt) out.push(dim('    ' + reason))
+    if (portable) {
+      out.push(dim('    Portable coverage: self-contained oracles ran; enriched semantic depth was unavailable.'))
+      for (const reason of opts.unavailableCoverage ?? []) out.push(dim('    ' + reason))
+    }
     out.push('')
     return out.join('\n')
   }
@@ -175,6 +183,9 @@ export function terminal(findings: Finding[], opts: TerminalOptions): string {
     out.push('')
     out.push(' ' + yellow('! this review is ' + opts.state + ' — findings may be missing'))
     for (const reason of opts.notLookedAt) out.push(dim('   ' + reason))
+  } else if (portable) {
+    out.push(' ' + steel('◇ portable coverage') + dim(' · enriched semantic depth was unavailable'))
+    for (const reason of opts.unavailableCoverage ?? []) out.push(dim('   ' + reason))
   }
   out.push('')
   return out.join('\n')

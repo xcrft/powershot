@@ -45,6 +45,8 @@ export function runSessionCommand(positionals: string[]): number {
       started: session.started,
       state: session.report.state ?? 'unknown',
       notLookedAt: session.report.notLookedAt ?? ['session predates verdict recording'],
+      coverage: session.report.coverage,
+      unavailableCoverage: session.report.unavailableCoverage,
     }))
     process.stdout.write(output + '\n')
     return 0

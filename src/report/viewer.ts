@@ -9,13 +9,22 @@ export function viewer(findings: Finding[], meta: {
   started: string
   state: 'complete' | 'partial' | 'failed' | 'unknown'
   notLookedAt: string[]
+  coverage?: 'full' | 'portable'
+  unavailableCoverage?: string[]
 }): string {
   const verified = findings.filter((f) => f.class === 'verified').length
   const incomplete = meta.state !== 'complete'
+  const portable = !incomplete && meta.coverage === 'portable'
   const warning = incomplete
     ? '<div class="warning"><strong>This review is ' + escape(meta.state) + ' — not a verdict.</strong>' +
       (meta.notLookedAt.length > 0
         ? '<ul>' + meta.notLookedAt.map((reason) => '<li>' + escape(reason) + '</li>').join('') + '</ul>'
+        : '') + '</div>'
+    : ''
+  const coverage = portable
+    ? '<div class="coverage"><strong>Portable coverage.</strong> Self-contained oracles ran; enriched semantic depth was unavailable.' +
+      ((meta.unavailableCoverage?.length ?? 0) > 0
+        ? '<ul>' + meta.unavailableCoverage!.map((reason) => '<li>' + escape(reason) + '</li>').join('') + '</ul>'
         : '') + '</div>'
     : ''
   const rows = findings
@@ -81,6 +90,8 @@ export function viewer(findings: Finding[], meta: {
   .none { color:var(--muted); }
   .warning { border:1px solid var(--amber); border-radius:6px; padding:10px 14px; margin:0 0 18px; }
   .warning ul { margin:6px 0 0; }
+  .coverage { border:1px solid var(--steel); border-radius:6px; padding:10px 14px; margin:0 0 18px; }
+  .coverage ul { margin:6px 0 0; }
   .f.put-away { opacity:.4; }
   .f.put-away .title { text-decoration:line-through; }
   .act { margin-left:8px; }
@@ -93,6 +104,7 @@ export function viewer(findings: Finding[], meta: {
   <p class="meta">${escape(meta.target)} · ${escape(meta.started.slice(0, 19).replace('T', ' '))} · session ${escape(meta.id)}<br>
     ${findings.length} finding(s) — ${verified} verified, ${findings.length - verified} judged</p>
   ${warning}
+  ${coverage}
   <div class="bar">
     <button data-filter="all" aria-pressed="true">all</button>
     <button data-filter="verified" aria-pressed="false">verified</button>
@@ -100,7 +112,7 @@ export function viewer(findings: Finding[], meta: {
     <button id="show-away" aria-pressed="false">show put away</button>
   </div>
   ${findings.length === 0
-    ? '<p class="none">' + (incomplete ? 'No findings from what completed.' : 'No findings.') + '</p>'
+    ? '<p class="none">' + (incomplete ? 'No findings from what completed.' : portable ? 'No findings in portable coverage.' : 'No findings.') + '</p>'
     : rows}
 </div>
 <script>

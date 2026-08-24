@@ -46,12 +46,6 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
 
-      # TypeScript can only prove API diagnostics when the target's declared ambient
-      # types are present. Lifecycle scripts stay disabled because this tree is untrusted.
-      - name: Install the target type environment
-        working-directory: target
-        run: npm ci --ignore-scripts
-
       - name: Review the diff once
         id: review
         working-directory: target

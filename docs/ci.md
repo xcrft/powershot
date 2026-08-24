@@ -16,6 +16,11 @@ There are two independent decisions:
 2. Do findings block the change? Set this per repository. Exit `1` is a complete
    verdict with findings, not an engine failure.
 
+A completed verdict has a separate coverage level. `full` means every applicable
+configured oracle ran. `portable` means every self-contained oracle ran while missing
+compiler/reference depth was named. Set `"coverage": "strict"` in
+`powershot.config.json` when portable depth must become exit `3` instead.
+
 | Exit | Meaning | Recommended CI handling |
 |---:|---|---|
 | `0` | Complete, no findings | Pass |
@@ -49,8 +54,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - run: npm ci --ignore-scripts
-
       - uses: xcrft/powershot@v1
         with:
           verify-only: 'true'
@@ -60,12 +63,16 @@ jobs:
           fail-on-findings: 'true'
 ```
 
-Type-aware checks use the checked-out project's declarations, so install its
-dependencies before PowerShot. Lifecycle scripts are disabled here because pull
-request code is untrusted; use the equivalent safe install for another package
-manager. For a monorepo without a root install, repeat the safe install step with the
-relevant package `working-directory`. PowerShot finds nested `tsconfig.json` and
-`tsconfig.*.json` files automatically; the workflow does not need to list projects.
+Portable coverage deliberately needs no repository install. This keeps fork and
+private-monorepo pull requests free of registry credentials while still running each
+declared language's syntax-backed oracles. When a trusted job already has dependencies,
+PowerShot uses the available declarations and can reach `full` coverage. Do not pass a
+private package token into a pull-request job merely to enrich review depth.
+
+PowerShot finds nested `tsconfig.json` and `tsconfig.*.json` files along changed-file
+ancestor chains; the workflow does not list projects. Python local-module discovery is
+bounded the same way. Foreign-language grammars run in disposable per-language workers
+and bounded batches, so all declared languages can coexist in one monorepo review.
 
 Set `upload-sarif: 'false'` and omit `security-events: write` when GitHub code scanning
 is unavailable or the workflow should not publish SARIF.
@@ -94,10 +101,10 @@ lives at [`examples/github-actions/action.yml`](../examples/github-actions/actio
 | `comment` | `true` | Maintain a pull-request comment |
 | `inline-comments` | `false` | Post up to ten proven verified findings as one inline review |
 | `fail-on-findings` | `false` | Turn a complete finding verdict into a failed job |
-| `approve` | `false` | Approve only a complete, clean review |
+| `approve` | `false` | Approve only a complete, clean, full-coverage review |
 
-The outputs are `findings` and `complete`. `complete` is the important one when a
-later job decides whether to publish or deploy.
+The outputs are `findings`, `complete`, and `coverage`. Gate infrastructure on
+`complete`; use `coverage == 'full'` for decisions that require semantic depth.
 
 ## Direct CLI on GitHub Actions
 
@@ -108,7 +115,7 @@ step inside a larger quality job. The complete example is
 The core pattern is:
 
 ```bash
-npm install --global --ignore-scripts @0xcraft/powershot@1.1.1
+npm install --global --ignore-scripts @0xcraft/powershot@1.1.2
 
 STATUS=0
 psh review --verify-only \
@@ -156,6 +163,7 @@ and artifact declaration.
 - Run `--verify-only` as the fast required check; add model judges only where their
   cost and latency are intentional.
 - Treat exit `2`, `3`, and `130` as infrastructure or completeness failures.
+- Read the manifest or Action `coverage` output before treating portable depth as full.
 - Generate every report from one invocation.
 - Publish the Markdown report for humans and SARIF or Code Quality for annotations.
 - Pin the PowerShot source version in protected workflows.
