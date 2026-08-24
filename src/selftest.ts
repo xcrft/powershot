@@ -66,6 +66,12 @@ import {
   type ExistingReviewComment,
   type PullRequestApi,
 } from './github/inline-comments.js'
+import {
+  SUMMARY_MARKER,
+  summaryCommentBody,
+  syncSummaryComment,
+  type SummaryCommentApi,
+} from './github/summary-comment.js'
 
 const root = '/repo'
 
@@ -768,6 +774,72 @@ const sample: Finding[] = [
     file: 'src/b.ts', line: 9, title: 'off by one' },
 ]
 
+await checkAsync('summary publishing creates a marked comment without touching another workflow', async () => {
+  const events: string[] = []
+  const api: SummaryCommentApi = {
+    listIssueComments: async () => [
+      { id: 8, body: '## PR Analysis', user: { login: 'github-actions[bot]' } },
+      { id: 9, body: SUMMARY_MARKER, user: { login: 'human' } },
+    ],
+    createIssueComment: async (body) => { events.push(`create:${body}`) },
+    updateIssueComment: async (id) => { events.push(`update:${id}`) },
+  }
+
+  const result = await syncSummaryComment(api, '## PowerShot\n\nNo findings.\n')
+  assert.deepEqual(result, { state: 'created' })
+  assert.deepEqual(events, [`create:${summaryCommentBody('## PowerShot\n\nNo findings.')}`])
+})
+
+await checkAsync('summary reruns update the marked PowerShot comment, not the latest bot comment', async () => {
+  const events: string[] = []
+  const api: SummaryCommentApi = {
+    listIssueComments: async () => [
+      { id: 10, body: `## PowerShot\n\nOld\n\n${SUMMARY_MARKER}`, user: { login: 'github-actions[bot]' } },
+      { id: 11, body: '## Best Practices', user: { login: 'github-actions[bot]' } },
+    ],
+    createIssueComment: async () => { events.push('create') },
+    updateIssueComment: async (id, body) => { events.push(`update:${id}:${body}`) },
+  }
+
+  const markdown = '## PowerShot\n\nNew'
+  const result = await syncSummaryComment(api, markdown)
+  assert.deepEqual(result, { state: 'updated', commentId: 10 })
+  assert.deepEqual(events, [`update:10:${summaryCommentBody(markdown)}`])
+})
+
+await checkAsync('summary reruns make no write when the marked body is current', async () => {
+  const body = summaryCommentBody('## PowerShot\n\nCurrent')
+  const api: SummaryCommentApi = {
+    listIssueComments: async () => [
+      { id: 10, body, user: { login: 'github-actions[bot]' } },
+      { id: 11, body: '## Best Practices', user: { login: 'github-actions[bot]' } },
+    ],
+    createIssueComment: async () => { throw new Error('must not create') },
+    updateIssueComment: async () => { throw new Error('must not update') },
+  }
+
+  assert.deepEqual(await syncSummaryComment(api, '## PowerShot\n\nCurrent'), {
+    state: 'unchanged', commentId: 10,
+  })
+})
+
+await checkAsync('summary publishing migrates the newest legacy PowerShot body once', async () => {
+  const events: number[] = []
+  const api: SummaryCommentApi = {
+    listIssueComments: async () => [
+      { id: 12, body: '## PowerShot\n\nOlder', user: { login: 'github-actions[bot]' } },
+      { id: 14, body: '## PowerShot\n\nLatest', user: { login: 'github-actions[bot]' } },
+      { id: 15, body: '## PR Analysis', user: { login: 'github-actions[bot]' } },
+    ],
+    createIssueComment: async () => { throw new Error('must not create') },
+    updateIssueComment: async (id) => { events.push(id) },
+  }
+
+  const result = await syncSummaryComment(api, '## PowerShot\n\nCurrent')
+  assert.deepEqual(result, { state: 'migrated', commentId: 14 })
+  assert.deepEqual(events, [14])
+})
+
 check('GitHub patches expose only added right-side lines for inline comments', () => {
   const patch = [
     '@@ -1,3 +1,4 @@',
@@ -904,7 +976,12 @@ await checkAsync('the GitHub client paginates files, submits the review contract
         { id: 10, path: 'a.ts', line: 1, body: 'reply', in_reply_to_id: 9, user: { login: 'human' } },
       ])
     }
+    if (method === 'GET' && url.includes('/issues/7/comments')) {
+      return json([{ id: 21, body: 'summary', user: { login: 'github-actions[bot]' } }])
+    }
     if (method === 'POST' && url.endsWith('/pulls/7/reviews')) return json({ id: 1 })
+    if (method === 'POST' && url.endsWith('/issues/7/comments')) return json({ id: 22 })
+    if (method === 'PATCH' && url.endsWith('/issues/comments/21')) return json({ id: 21 })
     if (method === 'DELETE' && url.endsWith('/pulls/comments/9')) return json({ message: 'gone' }, { status: 404 })
     return json({ message: 'unexpected request' }, { status: 500 })
   }
@@ -922,11 +999,16 @@ await checkAsync('the GitHub client paginates files, submits the review contract
     assert.equal(comments[1]?.inReplyToId, 9)
     await api.createReview('a'.repeat(40), [{ path: 'a.ts', line: 1, side: 'RIGHT', body: 'finding' }])
     await api.deleteReviewComment(9)
+    assert.deepEqual(await api.listIssueComments(), [
+      { id: 21, body: 'summary', user: { login: 'github-actions[bot]' } },
+    ])
+    await api.updateIssueComment(21, 'updated summary')
+    await api.createIssueComment('new summary')
   } finally {
     globalThis.fetch = originalFetch
   }
 
-  const submitted = calls.find((call) => call.method === 'POST')
+  const submitted = calls.find((call) => call.method === 'POST' && call.url.endsWith('/pulls/7/reviews'))
   assert.ok(submitted?.body)
   assert.deepEqual(JSON.parse(submitted.body), {
     commit_id: 'a'.repeat(40),
@@ -935,6 +1017,8 @@ await checkAsync('the GitHub client paginates files, submits the review contract
     comments: [{ path: 'a.ts', line: 1, side: 'RIGHT', body: 'finding' }],
   })
   assert.equal(calls.filter((call) => call.url.includes('/files')).length, 2)
+  assert.equal(calls.some((call) => call.method === 'PATCH' && call.url.endsWith('/issues/comments/21') && call.body === '{"body":"updated summary"}'), true)
+  assert.equal(calls.some((call) => call.method === 'POST' && call.url.endsWith('/issues/7/comments') && call.body === '{"body":"new summary"}'), true)
 })
 
 await checkAsync('inline synchronization creates one review before removing stale comments', async () => {
@@ -1043,6 +1127,8 @@ check('the public action persists judge answers and publishes only a verdict', (
   assert.match(action, /inline-comments:\s*\n\s+description: [^\n]+\n\s+default: 'false'/)
   assert.match(action, /Post inline comments[\s\S]+inputs\.inline-comments == 'true'[\s\S]+steps\.review\.outputs\.complete == 'true'/)
   assert.match(action, /node "\$GITHUB_ACTION_PATH\/dist\/github\/inline-comments\.js"/)
+  assert.doesNotMatch(action, /--edit-last/)
+  assert.match(action, /node "\$GITHUB_ACTION_PATH\/dist\/github\/summary-comment\.js"/)
   assert.match(action, /--report manifest=powershot\.manifest\.json/)
   assert.match(action, /coverage=\$COVERAGE/)
   assert.match(action, /m\.coverage === "full" \|\| m\.coverage === "portable" \? m\.coverage : "unknown"/)

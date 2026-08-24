@@ -77,6 +77,11 @@ and bounded batches, so all declared languages can coexist in one monorepo revie
 Set `upload-sarif: 'false'` and omit `security-events: write` when GitHub code scanning
 is unavailable or the workflow should not publish SARIF.
 
+`comment: 'true'` maintains one summary through a hidden PowerShot marker. Reruns
+update only that marked `github-actions[bot]` comment, so comments created by other
+workflows under the same bot identity are left alone. The first marked run reuses the
+newest legacy `## PowerShot` summary from v1.1.2 or older when one exists.
+
 `inline-comments: 'true'` requires `pull-requests: write`. It publishes at most ten
 findings as one review. Only deterministic `verified` findings with `proven`
 confidence, severity `medium` or higher, and a GitHub-confirmed added line qualify.

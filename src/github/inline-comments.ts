@@ -22,6 +22,11 @@ export type ExistingReviewComment = {
   user?: { login?: string }
   inReplyToId?: number
 }
+export type ExistingIssueComment = {
+  id: number
+  body: string
+  user?: { login?: string }
+}
 export type ReconcilePlan = { create: InlineComment[]; staleIds: number[]; kept: number }
 
 export interface PullRequestApi {
@@ -315,6 +320,8 @@ function errorDetail(value: string): string {
 export class GitHubPullRequestApi implements PullRequestApi {
   private readonly base: string
   private readonly pullPath: string
+  private readonly issuePath: string
+  private readonly issueCommentPath: string
 
   constructor(
     apiUrl: string,
@@ -324,7 +331,10 @@ export class GitHubPullRequestApi implements PullRequestApi {
     private readonly pullNumber: number,
   ) {
     this.base = apiUrl.replace(/\/$/, '')
-    this.pullPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls`
+    const repositoryPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`
+    this.pullPath = `${repositoryPath}/pulls`
+    this.issuePath = `${repositoryPath}/issues/${pullNumber}`
+    this.issueCommentPath = `${repositoryPath}/issues/comments`
   }
 
   private url(endpoint: string): string {
@@ -432,6 +442,31 @@ export class GitHubPullRequestApi implements PullRequestApi {
 
   async deleteReviewComment(id: number): Promise<void> {
     await this.request('DELETE', `${this.pullPath}/comments/${id}`, undefined, [404])
+  }
+
+  async listIssueComments(): Promise<ExistingIssueComment[]> {
+    const values = await this.all(`${this.issuePath}/comments`)
+    return values.map((value, index) => {
+      if (
+        !record(value) ||
+        !Number.isSafeInteger(value.id) ||
+        (value.body !== null && typeof value.body !== 'string')
+      ) {
+        throw new Error(`GitHub API issue comment ${index + 1} has an invalid contract`)
+      }
+      const user = record(value.user) && typeof value.user.login === 'string'
+        ? { login: value.user.login }
+        : undefined
+      return { id: Number(value.id), body: value.body ?? '', user }
+    })
+  }
+
+  async createIssueComment(body: string): Promise<void> {
+    await this.request('POST', `${this.issuePath}/comments`, { body })
+  }
+
+  async updateIssueComment(id: number, body: string): Promise<void> {
+    await this.request('PATCH', `${this.issueCommentPath}/${id}`, { body })
   }
 }
 
