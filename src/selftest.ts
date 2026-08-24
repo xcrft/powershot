@@ -51,7 +51,7 @@ import { sarif } from './report/sarif.js'
 import { markdown } from './report/markdown.js'
 import { wrap } from './report/terminal.js'
 import { highlight, isJsx } from './report/highlight.js'
-import { normalizeName, readEnvManifest, relPath } from './ground.js'
+import { buildGround, normalizeName, readEnvManifest, relPath } from './ground.js'
 import { incompleteReasons } from './bench.js'
 import { PACKAGE_NAME, PACKAGE_VERSION } from './package-meta.js'
 import {
@@ -107,7 +107,7 @@ function ground(files: { path: string; after: string; before?: string }[], deps:
     }
   }
 
-  return { root, project, beforeProject, changed, files: entries, symbolIndex, deps: new Set(deps), depsFor: () => new Set(deps), typed: false, internalPrefixes: [], foreign: [] }
+  return { root, sourceFiles: project.getSourceFiles(), configFiles: [], beforeProject, changed, files: entries, symbolIndex, deps: new Set(deps), depsFor: () => new Set(deps), typed: false, internalPrefixes: [], foreign: [] }
 }
 
 let failures = 0
@@ -982,11 +982,11 @@ check('published CI examples preserve one verdict and its exit status', () => {
   assert.match(action, /inline-comments: 'true'/)
   assert.match(action, /runs-on: ubuntu-24\.04/)
   assert.match(action, /npm ci --ignore-scripts[\s\S]+uses: xcrft\/powershot@v1/)
-  assert.match(github, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.0/)
+  assert.match(github, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.1/)
   assert.equal(github.match(/psh review/g)?.length, 1)
   assert.match(github, /--report markdown=powershot\.md[\s\S]+--report sarif=powershot\.sarif/)
   assert.match(github, /\|\| STATUS=\$\?[\s\S]+case "\$STATUS"/)
-  assert.match(gitlab, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.0/)
+  assert.match(gitlab, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.1/)
   assert.equal(gitlab.match(/psh review/g)?.length, 1)
   assert.match(gitlab, /--format codequality > gl-code-quality-report\.json \|\| STATUS=\$\?/)
   assert.match(gitlab, /test "\$STATUS" -le 1 \|\| exit "\$STATUS"/)
@@ -1536,6 +1536,104 @@ await checkAsync('phantom-api still proves a property error with a complete type
     assert.equal(result.findings[0]?.check, 'phantom-api')
     assert.equal(result.findings[0]?.confidence, 'proven')
     assert.deepEqual(result.skippedChecks, [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+await checkAsync('nested solution and leaf configs type both source and excluded test files', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-nested-tsconfig-')))
+  try {
+    const web = join(dir, 'packages', 'web')
+    mkdirSync(join(web, 'src'), { recursive: true })
+    writeFileSync(join(web, 'tsconfig.json'), JSON.stringify({
+      files: [],
+      references: [{ path: './tsconfig.app.json' }],
+    }))
+    writeFileSync(join(web, 'tsconfig.app.json'), JSON.stringify({
+      compilerOptions: {
+        target: 'ES2023', module: 'ESNext', moduleResolution: 'Bundler', strict: true,
+      },
+      include: ['src'],
+      exclude: ['src/**/*.test.ts'],
+    }))
+    writeFileSync(join(web, 'src', 'existing.ts'), "export const existing = 'ok'\n")
+    writeFileSync(join(web, 'src', 'app.ts'), "export const app = 'ok'.definitelyMissing()\n")
+    writeFileSync(join(web, 'src', 'app.test.ts'), "export const test = 'ok'.alsoMissing()\n")
+
+    // An unrelated broken project must never be opened just because it is somewhere
+    // in the same monorepo.
+    mkdirSync(join(dir, 'packages', 'unrelated'), { recursive: true })
+    writeFileSync(join(dir, 'packages', 'unrelated', 'tsconfig.json'), '{broken')
+
+    const changes = [
+      { path: 'packages/web/src/app.ts', added: new Set([1]) },
+      { path: 'packages/web/src/app.test.ts', added: new Set([1]) },
+    ]
+    const result = await review({
+      root: dir,
+      range: {},
+      changes,
+      config: loadConfig(dir),
+      verifyOnly: true,
+      checks: ['phantom-api'],
+    })
+
+    assert.equal(result.findings.length, 2)
+    assert.deepEqual(result.skippedChecks, [])
+    assert.deepEqual(result.plan?.items().map((item) => item.missing), [undefined, undefined])
+
+    const g = await buildGround(dir, changes)
+    assert.deepEqual(g.configFiles, ['packages/web/tsconfig.app.json'])
+    assert.deepEqual(g.files.map((file) => file.typed), [true, true])
+    assert.equal(g.sourceFiles.length, 3)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+await checkAsync('one review can reuse several independent package projects', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-many-projects-')))
+  try {
+    const changes: ChangedFile[] = []
+    for (const name of ['api', 'web']) {
+      const packageDir = join(dir, 'packages', name)
+      mkdirSync(join(packageDir, 'src'), { recursive: true })
+      writeFileSync(join(packageDir, 'tsconfig.json'), JSON.stringify({
+        compilerOptions: { target: 'ES2023', module: 'ESNext', strict: true },
+        include: ['src'],
+      }))
+      writeFileSync(join(packageDir, 'src', 'one.ts'), 'export const one = 1\n')
+      writeFileSync(join(packageDir, 'src', 'two.ts'), 'export const two = 2\n')
+      changes.push(
+        { path: 'packages/' + name + '/src/one.ts', added: new Set([1]) },
+        { path: 'packages/' + name + '/src/two.ts', added: new Set([1]) },
+      )
+    }
+
+    const g = await buildGround(dir, changes)
+    assert.deepEqual(g.configFiles, [
+      'packages/api/tsconfig.json',
+      'packages/web/tsconfig.json',
+    ])
+    assert.deepEqual(g.files.map((file) => file.typed), [true, true, true, true])
+    assert.equal(g.sourceFiles.length, 4)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+await checkAsync('a configless repository parses changed files without loading the monorepo', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-focused-ground-')))
+  try {
+    mkdirSync(join(dir, 'changed'), { recursive: true })
+    writeFileSync(join(dir, 'changed', 'one.ts'), 'export const one = 1\n')
+    for (let i = 0; i < 100; i++) {
+      const packageDir = join(dir, 'packages', 'package-' + i)
+      mkdirSync(packageDir, { recursive: true })
+      writeFileSync(join(packageDir, 'unrelated.ts'), 'export const unrelated = ' + i + '\n')
+      writeFileSync(join(packageDir, 'tsconfig.json'), '{broken')
+    }
+
+    const g = await buildGround(dir, [{ path: 'changed/one.ts', added: new Set([1]) }])
+    assert.equal(g.sourceFiles.length, 1)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

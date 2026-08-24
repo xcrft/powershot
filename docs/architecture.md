@@ -59,7 +59,7 @@ engine. The engine does not depend on a workflow provider or terminal layout.
 |---|---|---|
 | `src/cli/` | Argument parsing, command dispatch, report publication, exit mapping | Review algorithms |
 | `src/review.ts` | One review run and its stage orchestration | CLI parsing or presentation |
-| `src/ground.ts` | TypeScript project, parse trees, manifests, symbol index | Check selection |
+| `src/ground.ts` | Change-scoped TypeScript projects, parse trees, manifests, symbol index | Check selection |
 | `src/plan.ts` | File selection and per-file capability accounting | Finding generation |
 | `src/manifest.ts` | Completion state and the authoritative run record | Rendering |
 | `src/verifiers/` | Deterministic check implementations | Model calls |
@@ -125,6 +125,20 @@ positioning all receive the same tree.
 A run can contain a typed TypeScript file beside a Python file or a TypeScript file
 excluded from `tsconfig`. Capabilities therefore live on each selected file. A checker
 available somewhere in the run is not evidence that it inspected every file.
+
+### Monorepo grounding follows the change
+
+For each changed TypeScript or JavaScript file, grounding inspects only its ancestor
+directories for `tsconfig.json` and `tsconfig.*.json`. The nearest config that owns
+the file wins. Empty solution configs yield to their leaf configs, and an excluded
+test can reuse the closest non-empty leaf project when its type environment resolves.
+Projects and directory listings are cached across files, then their source closures
+are deduplicated for syntax searches and symbol indexing.
+
+There is deliberately no repository-wide fallback glob. When no relevant config
+exists, only changed files are parsed and type-dependent capabilities remain absent.
+That keeps a configless or mixed-language monorepo proportional to the review rather
+than to the repository.
 
 ### The manifest owns completion
 

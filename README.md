@@ -225,7 +225,14 @@ The composite action is the shortest setup for GitHub:
 Install the checked-out project's dependencies before PowerShot so TypeScript can
 resolve its declared ambient types. The example disables lifecycle scripts because
 pull-request code is untrusted; use the equivalent safe install for another package
-manager.
+manager. In a monorepo, install from the workspace root or add safe install steps for
+the affected package roots.
+
+PowerShot discovers `tsconfig.json` and `tsconfig.*.json` along the ancestor chain of
+each changed file. One review can use several independent package projects, skip
+empty solution configs in favour of their leaf configs, and type-check test files
+that a production config excludes. Discovery is change-scoped: unrelated packages
+and configless source trees are not crawled just to build the TypeScript ground.
 
 `@v1` follows compatible `1.x` releases. Pin the action to a full commit SHA in a
 protected required workflow when immutable dependencies are required.

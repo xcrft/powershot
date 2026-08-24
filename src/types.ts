@@ -52,18 +52,21 @@ export type ForeignFile = {
 
 export type Ground = {
   root: string
-  project: Project
+  /** Deduplicated source closure of only the TypeScript projects relevant to the change. */
+  sourceFiles: SourceFile[]
+  /** Repo-relative configs selected for changed files; empty means syntax-only. */
+  configFiles: string[]
   /** syntax-only, holding the base-ref version of each changed file */
   beforeProject: Project
   changed: ChangedFile[]
-  /** `typed` is per file: the tsconfig owns it and its ambient type environment resolved */
+  /** `typed` is per file: a configured project supplies a resolved ambient environment */
   files: { sf: SourceFile; changed: ChangedFile; before?: SourceFile; typed: boolean }[]
   /** normalized name -> where it already lives */
   symbolIndex: Map<string, { file: string; name: string; line: number }[]>
   deps: Set<string>
   /** walks up through workspace manifests: a monorepo declares deps per package */
   depsFor: (absPath: string) => Set<string>
-  /** false when no tsconfig was found — type-dependent verifiers must skip */
+  /** true when at least one changed file has a complete configured type environment */
   typed: boolean
   /** `compilerOptions.paths` prefixes — look like packages, resolve inside the repo */
   internalPrefixes: string[]

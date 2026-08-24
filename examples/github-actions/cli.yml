@@ -19,7 +19,7 @@ jobs:
           node-version: '24'
 
       - name: Install PowerShot
-        run: npm install --global --ignore-scripts @0xcraft/powershot@1.1.0
+        run: npm install --global --ignore-scripts @0xcraft/powershot@1.1.1
 
       - name: Review pull request
         env:

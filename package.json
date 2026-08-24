@@ -1,6 +1,6 @@
 {
   "name": "@0xcraft/powershot",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Oracle-first code review for machine-written code, with deterministic verification and CI-ready reports.",
   "license": "Apache-2.0",
   "author": "aglumova <alina.glumova@gmail.com>",

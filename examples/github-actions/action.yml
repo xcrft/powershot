@@ -17,7 +17,8 @@ jobs:
           fetch-depth: 0
 
       # Type-aware checks need the repository's declared types. Keep lifecycle
-      # scripts disabled when pull-request code is not trusted.
+      # scripts disabled when pull-request code is not trusted. In a monorepo,
+      # install at the workspace root or set working-directory to the package root.
       - run: npm ci --ignore-scripts
 
       - uses: xcrft/powershot@v1
