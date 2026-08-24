@@ -56,16 +56,27 @@ import { incompleteReasons } from './bench.js'
 import { PACKAGE_NAME, PACKAGE_VERSION } from './package-meta.js'
 import {
   addedLinesFromPatch,
-  createReviewPayload,
-  GitHubPullRequestApi,
   inlineMarker,
   parseReviewFindings,
   reconcileInlineComments,
   selectInlineComments,
   syncInlineComments,
-  type ExistingReviewComment,
   type PullRequestApi,
 } from './github/inline-comments.js'
+import {
+  createReviewPayload,
+  GitHubPullRequestApi,
+  type ExistingIssueComment,
+  type ExistingReviewComment,
+} from './github/api.js'
+import {
+  LEGACY_SUMMARY_MARKER,
+  summaryCommentBody,
+  summaryMarker,
+  syncSummaryComment,
+  workflowCommentScope,
+  type SummaryCommentApi,
+} from './github/summary-comment.js'
 
 const root = '/repo'
 
@@ -768,6 +779,388 @@ const sample: Finding[] = [
     file: 'src/b.ts', line: 9, title: 'off by one' },
 ]
 
+const summaryHead = 'a'.repeat(40)
+const summaryScope = 'xcrft/powershot/.github/workflows/review.yml:review'
+const ownedSummaryMarker = summaryMarker(summaryScope)
+const renderedSummary = (markdown: string): string =>
+  summaryCommentBody(markdown, ownedSummaryMarker, summaryHead)
+
+check('summary scope follows the workflow file and job, not its moving ref', () => {
+  assert.equal(
+    workflowCommentScope(
+      'xcrft/powershot/.github/workflows/review.yml@refs/pull/6/merge',
+      'review',
+    ),
+    summaryScope,
+  )
+  assert.equal(
+    workflowCommentScope(
+      'xcrft/powershot/.github/workflows/review.yml@refs/heads/release@v1',
+      'review',
+    ),
+    summaryScope,
+  )
+})
+
+await checkAsync('summary publishing creates a marked comment without touching another workflow', async () => {
+  const events: string[] = []
+  const comments: ExistingIssueComment[] = [
+    { id: 8, body: '## PR Analysis', user: { login: 'github-actions[bot]' } },
+    { id: 9, body: ownedSummaryMarker, user: { login: 'human' } },
+  ]
+  const api: SummaryCommentApi = {
+    headSha: async () => summaryHead,
+    listIssueComments: async () => [...comments],
+    createIssueComment: async (body) => {
+      events.push(`create:${body}`)
+      const created = { id: 10, body, user: { login: 'github-actions[bot]' } }
+      comments.push(created)
+      return created
+    },
+    updateIssueComment: async (id) => { events.push(`update:${id}`) },
+    deleteIssueComment: async (id) => { events.push(`delete:${id}`) },
+  }
+
+  const result = await syncSummaryComment(api, '## PowerShot\n\nNo findings.\n', summaryHead, summaryScope)
+  assert.deepEqual(result, { state: 'created', commentId: 10, retired: 0 })
+  assert.deepEqual(events, [`create:${renderedSummary('## PowerShot\n\nNo findings.')}`])
+})
+
+await checkAsync('summary reruns update the marked PowerShot comment, not the latest bot comment', async () => {
+  const events: string[] = []
+  const api: SummaryCommentApi = {
+    headSha: async () => summaryHead,
+    listIssueComments: async () => [
+      { id: 10, body: renderedSummary('## PowerShot\n\nOld'), user: { login: 'github-actions[bot]' } },
+      { id: 11, body: '## Best Practices', user: { login: 'github-actions[bot]' } },
+    ],
+    createIssueComment: async () => { throw new Error('must not create') },
+    updateIssueComment: async (id, body) => { events.push(`update:${id}:${body}`) },
+    deleteIssueComment: async (id) => { events.push(`delete:${id}`) },
+  }
+
+  const markdown = '## PowerShot\n\nNew'
+  const result = await syncSummaryComment(api, markdown, summaryHead, summaryScope)
+  assert.deepEqual(result, { state: 'updated', commentId: 10, retired: 0 })
+  assert.deepEqual(events, [`update:10:${renderedSummary(markdown)}`])
+})
+
+await checkAsync('summary reruns make no write when the marked body is current', async () => {
+  const body = renderedSummary('## PowerShot\n\nCurrent')
+  const api: SummaryCommentApi = {
+    headSha: async () => summaryHead,
+    listIssueComments: async () => [
+      { id: 10, body, user: { login: 'github-actions[bot]' } },
+      { id: 11, body: '## Best Practices', user: { login: 'github-actions[bot]' } },
+    ],
+    createIssueComment: async () => { throw new Error('must not create') },
+    updateIssueComment: async () => { throw new Error('must not update') },
+    deleteIssueComment: async () => { throw new Error('must not delete') },
+  }
+
+  assert.deepEqual(await syncSummaryComment(api, '## PowerShot\n\nCurrent', summaryHead, summaryScope), {
+    state: 'unchanged', commentId: 10, retired: 0,
+  })
+})
+
+await checkAsync('summary publishing migrates the newest legacy PowerShot body once', async () => {
+  const events: string[] = []
+  const comments: ExistingIssueComment[] = [
+    { id: 12, body: LEGACY_SUMMARY_MARKER, user: { login: 'github-actions[bot]' } },
+    { id: 14, body: '## PowerShot\n\nLatest', user: { login: 'github-actions[bot]' } },
+    { id: 15, body: '## PR Analysis', user: { login: 'github-actions[bot]' } },
+  ]
+  const api: SummaryCommentApi = {
+    headSha: async () => summaryHead,
+    listIssueComments: async () => [...comments],
+    createIssueComment: async (body) => {
+      events.push('create')
+      const created = { id: 16, body, user: { login: 'github-actions[bot]' } }
+      comments.push(created)
+      return created
+    },
+    updateIssueComment: async () => { throw new Error('legacy comments must not be claimed with PATCH') },
+    deleteIssueComment: async (id) => {
+      events.push(`delete:${id}`)
+      const index = comments.findIndex((comment) => comment.id === id)
+      if (index !== -1) comments.splice(index, 1)
+    },
+  }
+
+  const result = await syncSummaryComment(api, '## PowerShot\n\nCurrent', summaryHead, summaryScope)
+  assert.deepEqual(result, { state: 'migrated', commentId: 16, retired: 1 })
+  assert.deepEqual(events, ['create', 'delete:14'])
+  assert.equal(comments.some((comment) => comment.id === 12), true)
+})
+
+await checkAsync('summary publishing never patches a candidate from another pull request head', async () => {
+  const previousHead = '9'.repeat(40)
+  const comments: ExistingIssueComment[] = [
+    { id: 16, body: summaryCommentBody('old head', ownedSummaryMarker, previousHead), user: { login: 'github-actions[bot]' } },
+  ]
+  const events: string[] = []
+  const api: SummaryCommentApi = {
+    headSha: async () => summaryHead,
+    listIssueComments: async () => [...comments],
+    createIssueComment: async (body) => {
+      events.push('create')
+      const created = { id: 17, body, user: { login: 'github-actions[bot]' } }
+      comments.push(created)
+      return created
+    },
+    updateIssueComment: async () => { throw new Error('must not patch a different-head candidate') },
+    deleteIssueComment: async (id) => {
+      events.push(`delete:${id}`)
+      const index = comments.findIndex((comment) => comment.id === id)
+      if (index !== -1) comments.splice(index, 1)
+    },
+  }
+
+  assert.deepEqual(await syncSummaryComment(api, 'current head', summaryHead, summaryScope), {
+    state: 'created', commentId: 17, retired: 1,
+  })
+  assert.deepEqual(events, ['create', 'delete:16'])
+  assert.deepEqual(comments.map((comment) => comment.id), [17])
+})
+
+await checkAsync('summary ownership requires the marker at the start of the bot comment', async () => {
+  const events: string[] = []
+  const comments: ExistingIssueComment[] = [{
+    id: 16,
+    body: `## PR Analysis\n\nQuoted output: ${ownedSummaryMarker}`,
+    user: { login: 'github-actions[bot]' },
+  }]
+  const api: SummaryCommentApi = {
+    headSha: async () => summaryHead,
+    listIssueComments: async () => [...comments],
+    createIssueComment: async (body) => {
+      events.push('create')
+      const created = { id: 17, body, user: { login: 'github-actions[bot]' } }
+      comments.push(created)
+      return created
+    },
+    updateIssueComment: async (id) => { events.push(`update:${id}`) },
+    deleteIssueComment: async (id) => { events.push(`delete:${id}`) },
+  }
+
+  assert.deepEqual(await syncSummaryComment(api, '## PowerShot\n\nCurrent', summaryHead, summaryScope), {
+    state: 'created', commentId: 17, retired: 0,
+  })
+  assert.deepEqual(events, ['create'])
+})
+
+await checkAsync('summary markers isolate different workflow jobs using the same bot', async () => {
+  const otherMarker = summaryMarker('xcrft/powershot/.github/workflows/audit.yml:audit')
+  const comments: ExistingIssueComment[] = [
+    {
+      id: 18,
+      body: summaryCommentBody('## PowerShot\n\nAudit', otherMarker, summaryHead),
+      user: { login: 'github-actions[bot]' },
+    },
+  ]
+  const api: SummaryCommentApi = {
+    headSha: async () => summaryHead,
+    listIssueComments: async () => [...comments],
+    createIssueComment: async (body) => {
+      const created = { id: 19, body, user: { login: 'github-actions[bot]' } }
+      comments.push(created)
+      return created
+    },
+    updateIssueComment: async () => { throw new Error('must not update another workflow') },
+    deleteIssueComment: async () => { throw new Error('must not delete another workflow') },
+  }
+
+  const result = await syncSummaryComment(api, '## PowerShot\n\nReview', summaryHead, summaryScope)
+  assert.deepEqual(result, { state: 'created', commentId: 19, retired: 0 })
+  assert.equal(comments[0]?.body.includes('Audit'), true)
+})
+
+await checkAsync('summary publishing makes no writes for an outdated pull request head', async () => {
+  const api: SummaryCommentApi = {
+    headSha: async () => 'b'.repeat(40),
+    listIssueComments: async () => { throw new Error('must not list') },
+    createIssueComment: async () => { throw new Error('must not create') },
+    updateIssueComment: async () => { throw new Error('must not update') },
+    deleteIssueComment: async () => { throw new Error('must not delete') },
+  }
+
+  assert.deepEqual(await syncSummaryComment(api, 'report', summaryHead, summaryScope), {
+    state: 'outdated', retired: 0,
+  })
+})
+
+await checkAsync('summary publishing makes no writes when the head changes during reads', async () => {
+  let headReads = 0
+  const api: SummaryCommentApi = {
+    headSha: async () => ++headReads === 1 ? summaryHead : 'b'.repeat(40),
+    listIssueComments: async () => [],
+    createIssueComment: async () => { throw new Error('must not create') },
+    updateIssueComment: async () => { throw new Error('must not update') },
+    deleteIssueComment: async () => { throw new Error('must not delete') },
+  }
+
+  assert.deepEqual(await syncSummaryComment(api, 'report', summaryHead, summaryScope), {
+    state: 'outdated', retired: 0,
+  })
+})
+
+await checkAsync('summary publishing retires its own new comment when the head changes after create', async () => {
+  let headReads = 0
+  const comments: ExistingIssueComment[] = []
+  const api: SummaryCommentApi = {
+    headSha: async () => ++headReads < 3 ? summaryHead : 'b'.repeat(40),
+    listIssueComments: async () => [...comments],
+    createIssueComment: async (body) => {
+      const created = { id: 19, body, user: { login: 'github-actions[bot]' } }
+      comments.push(created)
+      return created
+    },
+    updateIssueComment: async () => { throw new Error('must not update') },
+    deleteIssueComment: async (id) => {
+      const index = comments.findIndex((comment) => comment.id === id)
+      if (index !== -1) comments.splice(index, 1)
+    },
+  }
+
+  assert.deepEqual(await syncSummaryComment(api, 'report', summaryHead, summaryScope), {
+    state: 'outdated', retired: 1,
+  })
+  assert.deepEqual(comments, [])
+})
+
+await checkAsync('summary publishing stops after a same-head update when the pull request head changes', async () => {
+  const nextHead = 'b'.repeat(40)
+  let headReads = 0
+  const oldCandidate = { id: 19, body: renderedSummary('old'), user: { login: 'github-actions[bot]' } }
+  const newCandidate = {
+    id: 20,
+    body: summaryCommentBody('new head', ownedSummaryMarker, nextHead),
+    user: { login: 'github-actions[bot]' },
+  }
+  const comments: ExistingIssueComment[] = [oldCandidate]
+  const api: SummaryCommentApi = {
+    headSha: async () => ++headReads < 3 ? summaryHead : nextHead,
+    listIssueComments: async () => [...comments],
+    createIssueComment: async () => { throw new Error('must not create') },
+    updateIssueComment: async (id, body) => {
+      assert.equal(id, oldCandidate.id)
+      oldCandidate.body = body
+      comments.push(newCandidate)
+    },
+    deleteIssueComment: async () => { throw new Error('must not delete after the head changes') },
+  }
+
+  assert.deepEqual(await syncSummaryComment(api, 'updated old head', summaryHead, summaryScope), {
+    state: 'outdated', retired: 0,
+  })
+  assert.equal(comments[1]?.body, newCandidate.body)
+})
+
+await checkAsync('summary reruns retire only older duplicates with the same scoped marker', async () => {
+  const comments: ExistingIssueComment[] = [
+    { id: 20, body: renderedSummary('old'), user: { login: 'github-actions[bot]' } },
+    { id: 21, body: renderedSummary('old'), user: { login: 'github-actions[bot]' } },
+    { id: 22, body: 'human note', user: { login: 'human' } },
+  ]
+  const api: SummaryCommentApi = {
+    headSha: async () => summaryHead,
+    listIssueComments: async () => [...comments],
+    createIssueComment: async () => { throw new Error('must not create') },
+    updateIssueComment: async (id, body) => {
+      const comment = comments.find((candidate) => candidate.id === id)
+      if (comment) comment.body = body
+    },
+    deleteIssueComment: async (id) => {
+      const index = comments.findIndex((comment) => comment.id === id)
+      if (index !== -1) comments.splice(index, 1)
+    },
+  }
+
+  assert.deepEqual(await syncSummaryComment(api, 'current', summaryHead, summaryScope), {
+    state: 'updated', commentId: 21, retired: 1,
+  })
+  assert.deepEqual(comments.map((comment) => comment.id), [21, 22])
+})
+
+await checkAsync('concurrent first summary runs converge on one marked comment', async () => {
+  let releaseInitialReads = (): void => undefined
+  const initialReads = new Promise<void>((resolve) => { releaseInitialReads = resolve })
+  let reads = 0
+  let nextId = 20
+  const comments: ExistingIssueComment[] = []
+  const api: SummaryCommentApi = {
+    headSha: async () => summaryHead,
+    listIssueComments: async () => {
+      if (reads < 2) {
+        const snapshot = [...comments]
+        reads++
+        if (reads === 2) releaseInitialReads()
+        await initialReads
+        return snapshot
+      }
+      return [...comments]
+    },
+    createIssueComment: async (body) => {
+      const created = { id: nextId++, body, user: { login: 'github-actions[bot]' } }
+      comments.push(created)
+      return created
+    },
+    updateIssueComment: async () => { throw new Error('must not update') },
+    deleteIssueComment: async (id) => {
+      const index = comments.findIndex((comment) => comment.id === id)
+      if (index !== -1) comments.splice(index, 1)
+    },
+  }
+
+  await Promise.all([
+    syncSummaryComment(api, '## PowerShot\n\nCurrent', summaryHead, summaryScope),
+    syncSummaryComment(api, '## PowerShot\n\nCurrent', summaryHead, summaryScope),
+  ])
+  assert.equal(comments.filter((comment) => comment.body.startsWith(ownedSummaryMarker)).length, 1)
+})
+
+await checkAsync('different workflows replace a shared legacy summary without cross-scope PATCH', async () => {
+  let releaseInitialReads = (): void => undefined
+  const initialReads = new Promise<void>((resolve) => { releaseInitialReads = resolve })
+  let reads = 0
+  let nextId = 31
+  const legacy = { id: 30, body: '## PowerShot\n\nLegacy', user: { login: 'github-actions[bot]' } }
+  const comments: ExistingIssueComment[] = [legacy]
+  const api: SummaryCommentApi = {
+    headSha: async () => summaryHead,
+    listIssueComments: async () => {
+      if (reads < 2) {
+        const snapshot = [...comments]
+        reads++
+        if (reads === 2) releaseInitialReads()
+        await initialReads
+        return snapshot
+      }
+      return [...comments]
+    },
+    createIssueComment: async (body) => {
+      const created = { id: nextId++, body, user: { login: 'github-actions[bot]' } }
+      comments.push(created)
+      return created
+    },
+    updateIssueComment: async () => { throw new Error('legacy ownership must not use PATCH') },
+    deleteIssueComment: async (id) => {
+      const index = comments.findIndex((comment) => comment.id === id)
+      if (index !== -1) comments.splice(index, 1)
+    },
+  }
+  const auditScope = 'xcrft/powershot/.github/workflows/audit.yml:audit'
+
+  await Promise.all([
+    syncSummaryComment(api, 'review', summaryHead, summaryScope),
+    syncSummaryComment(api, 'audit', summaryHead, auditScope),
+  ])
+
+  assert.equal(comments.some((comment) => comment.id === legacy.id), false)
+  assert.equal(comments.filter((comment) => comment.body.startsWith(summaryMarker(summaryScope))).length, 1)
+  assert.equal(comments.filter((comment) => comment.body.startsWith(summaryMarker(auditScope))).length, 1)
+})
+
 check('GitHub patches expose only added right-side lines for inline comments', () => {
   const patch = [
     '@@ -1,3 +1,4 @@',
@@ -904,8 +1297,16 @@ await checkAsync('the GitHub client paginates files, submits the review contract
         { id: 10, path: 'a.ts', line: 1, body: 'reply', in_reply_to_id: 9, user: { login: 'human' } },
       ])
     }
+    if (method === 'GET' && url.includes('/issues/7/comments')) {
+      return json([{ id: 21, body: 'summary', user: { login: 'github-actions[bot]' } }])
+    }
     if (method === 'POST' && url.endsWith('/pulls/7/reviews')) return json({ id: 1 })
+    if (method === 'POST' && url.endsWith('/issues/7/comments')) {
+      return json({ id: 22, body: 'new summary', user: { login: 'github-actions[bot]' } }, { status: 201 })
+    }
+    if (method === 'PATCH' && url.endsWith('/issues/comments/21')) return json({ id: 21 })
     if (method === 'DELETE' && url.endsWith('/pulls/comments/9')) return json({ message: 'gone' }, { status: 404 })
+    if (method === 'DELETE' && url.endsWith('/issues/comments/21')) return new Response(undefined, { status: 204 })
     return json({ message: 'unexpected request' }, { status: 500 })
   }
 
@@ -922,11 +1323,19 @@ await checkAsync('the GitHub client paginates files, submits the review contract
     assert.equal(comments[1]?.inReplyToId, 9)
     await api.createReview('a'.repeat(40), [{ path: 'a.ts', line: 1, side: 'RIGHT', body: 'finding' }])
     await api.deleteReviewComment(9)
+    assert.deepEqual(await api.listIssueComments(), [
+      { id: 21, body: 'summary', user: { login: 'github-actions[bot]' } },
+    ])
+    await api.updateIssueComment(21, 'updated summary')
+    assert.deepEqual(await api.createIssueComment('new summary'), {
+      id: 22, body: 'new summary', user: { login: 'github-actions[bot]' },
+    })
+    await api.deleteIssueComment(21)
   } finally {
     globalThis.fetch = originalFetch
   }
 
-  const submitted = calls.find((call) => call.method === 'POST')
+  const submitted = calls.find((call) => call.method === 'POST' && call.url.endsWith('/pulls/7/reviews'))
   assert.ok(submitted?.body)
   assert.deepEqual(JSON.parse(submitted.body), {
     commit_id: 'a'.repeat(40),
@@ -935,6 +1344,9 @@ await checkAsync('the GitHub client paginates files, submits the review contract
     comments: [{ path: 'a.ts', line: 1, side: 'RIGHT', body: 'finding' }],
   })
   assert.equal(calls.filter((call) => call.url.includes('/files')).length, 2)
+  assert.equal(calls.some((call) => call.method === 'PATCH' && call.url.endsWith('/issues/comments/21') && call.body === '{"body":"updated summary"}'), true)
+  assert.equal(calls.some((call) => call.method === 'POST' && call.url.endsWith('/issues/7/comments') && call.body === '{"body":"new summary"}'), true)
+  assert.equal(calls.some((call) => call.method === 'DELETE' && call.url.endsWith('/issues/comments/21')), true)
 })
 
 await checkAsync('inline synchronization creates one review before removing stale comments', async () => {
@@ -1043,6 +1455,11 @@ check('the public action persists judge answers and publishes only a verdict', (
   assert.match(action, /inline-comments:\s*\n\s+description: [^\n]+\n\s+default: 'false'/)
   assert.match(action, /Post inline comments[\s\S]+inputs\.inline-comments == 'true'[\s\S]+steps\.review\.outputs\.complete == 'true'/)
   assert.match(action, /node "\$GITHUB_ACTION_PATH\/dist\/github\/inline-comments\.js"/)
+  assert.doesNotMatch(action, /--edit-last/)
+  assert.match(action, /node "\$GITHUB_ACTION_PATH\/dist\/github\/summary-comment\.js"/)
+  assert.match(action, /POWERSHOT_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/)
+  assert.match(action, /GITHUB_WORKFLOW_REF: \$\{\{ github\.workflow_ref \}\}/)
+  assert.match(action, /GITHUB_JOB: \$\{\{ github\.job \}\}/)
   assert.match(action, /--report manifest=powershot\.manifest\.json/)
   assert.match(action, /coverage=\$COVERAGE/)
   assert.match(action, /m\.coverage === "full" \|\| m\.coverage === "portable" \? m\.coverage : "unknown"/)
@@ -1055,6 +1472,7 @@ check('published CI examples preserve one verdict and its exit status', () => {
   assert.match(action, /upload-sarif: 'true'/)
   assert.match(action, /inline-comments: 'true'/)
   assert.match(action, /runs-on: ubuntu-24\.04/)
+  assert.match(action, /concurrency:[\s\S]+github\.workflow[\s\S]+cancel-in-progress: true/)
   assert.doesNotMatch(action, /npm ci|NPM_AUTH_TOKEN|NODE_AUTH_TOKEN/)
   assert.match(action, /uses: xcrft\/powershot@v1/)
   assert.match(github, /npm install --global --ignore-scripts @0xcraft\/powershot@1\.1\.2/)

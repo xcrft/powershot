@@ -3,25 +3,19 @@ import { readFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { stripControl } from '#app/text.js'
 import { SEVERITIES, type Finding } from '#app/types.js'
+import {
+  githubPullRequestApiFromEnvironment,
+  requiredEnvironment,
+  type ExistingReviewComment,
+  type InlineComment,
+  type PullFile,
+} from './api.js'
 
 const INLINE_COMMENT_LIMIT = 10
-const API_VERSION = '2022-11-28'
-const API_TIMEOUT_MS = 20_000
-const MAX_API_PAGES = 100
 const BOT_LOGIN = 'github-actions[bot]'
 const MARKER_PATTERN = /<!-- powershot:inline:v1:[a-f0-9]{24} -->/
 const COMMONMARK_PUNCTUATION = new Set(`!"#$%&'()*+,-./:;<=>?@[\\]^_\`{|}~`)
 
-export type PullFile = { filename: string; patch?: string }
-export type InlineComment = { path: string; line: number; side: 'RIGHT'; body: string }
-export type ExistingReviewComment = {
-  id: number
-  path: string
-  line: number | null
-  body: string
-  user?: { login?: string }
-  inReplyToId?: number
-}
 export type ReconcilePlan = { create: InlineComment[]; staleIds: number[]; kept: number }
 
 export interface PullRequestApi {
@@ -38,20 +32,6 @@ export type InlineSyncResult = {
   created: number
   kept: number
   retired: number
-}
-
-export function createReviewPayload(commitId: string, comments: InlineComment[]): {
-  commit_id: string
-  body: string
-  event: 'COMMENT'
-  comments: InlineComment[]
-} {
-  return {
-    commit_id: commitId,
-    body: `PowerShot posted ${comments.length} proven verified finding(s) on changed lines.`,
-    event: 'COMMENT',
-    comments,
-  }
 }
 
 function oneLine(value: string, limit: number): string {
@@ -251,11 +231,6 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function requiredString(value: unknown, name: string): string {
-  if (typeof value !== 'string' || value.length === 0) throw new Error(`GitHub API returned no ${name}`)
-  return value
-}
-
 export function parseReviewFindings(source: string): Finding[] {
   const document: unknown = JSON.parse(source)
   if (!record(document) || !Array.isArray(document.findings)) {
@@ -299,166 +274,11 @@ export function parseReviewFindings(source: string): Finding[] {
   })
 }
 
-function nextLink(value: string | null): string | undefined {
-  if (value === null) return undefined
-  for (const part of value.split(',')) {
-    const match = /^\s*<([^>]+)>;\s*rel="([^"]+)"\s*$/.exec(part)
-    if (match?.[2] === 'next') return match[1]
-  }
-  return undefined
-}
-
-function errorDetail(value: string): string {
-  return oneLine(value, 500)
-}
-
-export class GitHubPullRequestApi implements PullRequestApi {
-  private readonly base: string
-  private readonly pullPath: string
-
-  constructor(
-    apiUrl: string,
-    private readonly token: string,
-    owner: string,
-    repository: string,
-    private readonly pullNumber: number,
-  ) {
-    this.base = apiUrl.replace(/\/$/, '')
-    this.pullPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls`
-  }
-
-  private url(endpoint: string): string {
-    if (!endpoint.startsWith('http://') && !endpoint.startsWith('https://')) return this.base + endpoint
-    if (endpoint !== this.base && !endpoint.startsWith(this.base + '/')) {
-      throw new Error('GitHub pagination left the configured API origin')
-    }
-    return endpoint
-  }
-
-  private async request(
-    method: string,
-    endpoint: string,
-    body?: unknown,
-    acceptedStatuses: number[] = [],
-  ): Promise<{ data: unknown; next?: string }> {
-    const response = await fetch(this.url(endpoint), {
-      method,
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${this.token}`,
-        'User-Agent': 'PowerShot',
-        'X-GitHub-Api-Version': API_VERSION,
-        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(API_TIMEOUT_MS),
-    })
-    const source = await response.text()
-    if (!response.ok) {
-      if (acceptedStatuses.includes(response.status)) return { data: undefined }
-      throw new Error(`GitHub API ${method} failed with ${response.status}: ${errorDetail(source)}`)
-    }
-    const data: unknown = source.length === 0 ? undefined : JSON.parse(source)
-    return { data, next: nextLink(response.headers.get('link')) }
-  }
-
-  private async all(endpoint: string): Promise<unknown[]> {
-    const out: unknown[] = []
-    const seen = new Set<string>()
-    let next: string | undefined = endpoint + (endpoint.includes('?') ? '&' : '?') + 'per_page=100'
-    for (let page = 0; next !== undefined; page++) {
-      if (page >= MAX_API_PAGES) throw new Error('GitHub API pagination exceeded its safety limit')
-      if (seen.has(next)) throw new Error('GitHub API returned a pagination cycle')
-      seen.add(next)
-      const response = await this.request('GET', next)
-      if (!Array.isArray(response.data)) throw new Error('GitHub API returned a non-array page')
-      out.push(...response.data)
-      next = response.next
-    }
-    return out
-  }
-
-  async headSha(): Promise<string> {
-    const { data } = await this.request('GET', `${this.pullPath}/${this.pullNumber}`)
-    if (!record(data) || !record(data.head)) throw new Error('GitHub API returned no pull request head')
-    return requiredString(data.head.sha, 'pull request head SHA')
-  }
-
-  async listFiles(): Promise<PullFile[]> {
-    const values = await this.all(`${this.pullPath}/${this.pullNumber}/files`)
-    return values.map((value, index) => {
-      if (!record(value) || typeof value.filename !== 'string') {
-        throw new Error(`GitHub API pull file ${index + 1} has an invalid contract`)
-      }
-      if (value.patch !== undefined && typeof value.patch !== 'string') {
-        throw new Error(`GitHub API pull file ${index + 1} has an invalid patch`)
-      }
-      return { filename: value.filename, patch: value.patch }
-    })
-  }
-
-  async listReviewComments(): Promise<ExistingReviewComment[]> {
-    const values = await this.all(`${this.pullPath}/${this.pullNumber}/comments`)
-    return values.map((value, index) => {
-      if (
-        !record(value) ||
-        !Number.isSafeInteger(value.id) ||
-        typeof value.path !== 'string' ||
-        (value.line !== null && !Number.isSafeInteger(value.line)) ||
-        (value.body !== null && typeof value.body !== 'string') ||
-        (value.in_reply_to_id !== undefined && value.in_reply_to_id !== null && !Number.isSafeInteger(value.in_reply_to_id))
-      ) {
-        throw new Error(`GitHub API review comment ${index + 1} has an invalid contract`)
-      }
-      const user = record(value.user) && typeof value.user.login === 'string'
-        ? { login: value.user.login }
-        : undefined
-      return {
-        id: Number(value.id),
-        path: value.path,
-        line: value.line === null ? null : Number(value.line),
-        body: value.body ?? '',
-        user,
-        inReplyToId: value.in_reply_to_id === undefined || value.in_reply_to_id === null
-          ? undefined
-          : Number(value.in_reply_to_id),
-      }
-    })
-  }
-
-  async createReview(commitId: string, comments: InlineComment[]): Promise<void> {
-    await this.request('POST', `${this.pullPath}/${this.pullNumber}/reviews`, createReviewPayload(commitId, comments))
-  }
-
-  async deleteReviewComment(id: number): Promise<void> {
-    await this.request('DELETE', `${this.pullPath}/comments/${id}`, undefined, [404])
-  }
-}
-
-function environment(name: string): string {
-  const value = process.env[name]
-  if (value === undefined || value.length === 0) throw new Error(`${name} is required`)
-  return value
-}
-
 async function main(): Promise<void> {
-  const repository = environment('GITHUB_REPOSITORY').split('/')
-  if (repository.length !== 2 || !repository[0] || !repository[1]) {
-    throw new Error('GITHUB_REPOSITORY must be owner/repository')
-  }
-  const pullNumber = Number(environment('POWERSHOT_PR_NUMBER'))
-  if (!Number.isSafeInteger(pullNumber) || pullNumber < 1) throw new Error('POWERSHOT_PR_NUMBER must be positive')
-  const expectedHeadSha = environment('POWERSHOT_HEAD_SHA')
+  const expectedHeadSha = requiredEnvironment('POWERSHOT_HEAD_SHA')
   if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(expectedHeadSha)) throw new Error('POWERSHOT_HEAD_SHA is invalid')
-
   const findings = parseReviewFindings(await readFile('powershot.json', 'utf8'))
-  const api = new GitHubPullRequestApi(
-    environment('GITHUB_API_URL'),
-    environment('GITHUB_TOKEN'),
-    repository[0],
-    repository[1],
-    pullNumber,
-  )
+  const api = githubPullRequestApiFromEnvironment()
   const result = await syncInlineComments(api, findings, expectedHeadSha)
   if (result.outdated) {
     process.stdout.write('PowerShot skipped inline comments because the pull request head changed.\n')

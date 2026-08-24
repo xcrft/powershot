@@ -66,6 +66,7 @@ engine. The engine does not depend on a workflow provider or terminal layout.
 | `src/judges/` | Prompt data, bounded model loop, tool adapter | Git target selection |
 | `src/lang/` | Language-pack data, isolated parser workers, optional language oracles | Cross-run policy |
 | `src/report/` | Pure output adapters | Re-running or reinterpreting a review |
+| `src/github/` | GitHub REST transport and pull-request publication reconciliation | Review decisions or report rendering |
 | `src/bench.ts` | Historical and labelled evaluation | Production command dispatch |
 | `src/session.ts`, `src/cache.ts` | Reuse of completed judge work | Completion decisions |
 
