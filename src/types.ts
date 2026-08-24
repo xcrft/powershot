@@ -61,8 +61,8 @@ export type Ground = {
   changed: ChangedFile[]
   /** `typed` is per file: a configured project supplies a resolved ambient environment */
   files: { sf: SourceFile; changed: ChangedFile; before?: SourceFile; typed: boolean }[]
-  /** normalized name -> where it already lives */
-  symbolIndex: Map<string, { file: string; name: string; line: number }[]>
+  /** normalized name -> where a token-identical callable already lives */
+  symbolIndex: Map<string, { file: string; name: string; line: number; fingerprint: string; existedInBase: boolean; scope: string }[]>
   deps: Set<string>
   /** walks up through workspace manifests: a monorepo declares deps per package */
   depsFor: (absPath: string) => Set<string>

@@ -23,7 +23,7 @@ import { stripControl } from './text.js'
 import { review } from './review.js'
 import { withTargetTree } from './snapshot.js'
 import { loadConfig } from './config.js'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { insideRepo, repoPath } from './fspolicy.js'
 import { Budget, parseLimits } from './budget.js'
 import { SelectionPlan, capabilitiesOf } from './plan.js'
@@ -53,6 +53,7 @@ import { summarizeRun } from './report/summary.js'
 import { wrap } from './report/terminal.js'
 import { highlight, isJsx } from './report/highlight.js'
 import { buildGround, normalizeName, readEnvManifest, relPath } from './ground.js'
+import { implementationFingerprint, reinventionScope, typescriptImplementationFingerprint } from './reinvention.js'
 import { incompleteReasons } from './bench.js'
 import { PACKAGE_NAME, PACKAGE_VERSION } from './package-meta.js'
 import {
@@ -109,12 +110,26 @@ function ground(files: { path: string; after: string; before?: string }[], deps:
   const symbolIndex: Ground['symbolIndex'] = new Map()
   for (const sf of project.getSourceFiles()) {
     const rel = sf.getFilePath().slice(root.length + 1)
+    const input = files.find((file) => file.path === rel)
     for (const [name, decls] of sf.getExportedDeclarations()) {
       const decl = decls[0]
       if (!decl) continue
+      const fingerprint = typescriptImplementationFingerprint(decl)
+      if (!fingerprint) continue
       const key = normalizeName(name)
       const list = symbolIndex.get(key) ?? []
-      list.push({ file: rel, name, line: decl.getStartLineNumber() })
+      const before = input?.before === undefined ? undefined : beforeProject.getSourceFile('/before/' + rel)
+      const existedInBase = (before?.getExportedDeclarations().get(name) ?? []).some(
+        (baseDeclaration) => typescriptImplementationFingerprint(baseDeclaration) === fingerprint,
+      )
+      list.push({
+        file: rel,
+        name,
+        line: decl.getStartLineNumber(),
+        fingerprint,
+        existedInBase,
+        scope: reinventionScope(root, rel),
+      })
       symbolIndex.set(key, list)
     }
   }
@@ -175,13 +190,39 @@ check('resolves a scoped subpath to its package', () => {
 
 console.log('\nreinvented')
 check('fires when a helper already exists elsewhere', () => {
+  const existing = 'export function formatMinorUnits(n: number) { return n / 100 }\n'
   const g = ground([
-    { path: 'lib/currency.ts', after: 'export function formatMinorUnits(n: number) { return n / 100 }\n' },
-    { path: 'utils/money.ts', after: 'export function formatMinorUnits(n: number) { return n / 100 }\n' },
+    { path: 'lib/currency.ts', before: existing, after: existing },
+    { path: 'utils/money.ts', after: existing },
   ])
   const found = reinvented.run(g)
   assert.ok(found.length >= 1, 'expected a duplication finding')
   assert.equal(found[0]!.confidence, 'firm') // heuristic, never claims `proven`
+})
+check('silent when matching helpers are both new in the change', () => {
+  const added = 'export function formatMinorUnits(n: number) { return n / 100 }\n'
+  const g = ground([
+    { path: 'lib/currency.ts', after: added },
+    { path: 'utils/money.ts', after: added },
+  ])
+  assert.equal(fires(reinvented, g), false)
+})
+check('silent when the matching implementation already existed in the changed file', () => {
+  const existing = 'export function formatMinorUnits(n: number) { return n / 100 }\n'
+  const g = ground([
+    { path: 'lib/currency.ts', before: existing, after: existing },
+    { path: 'utils/money.ts', before: existing, after: existing },
+  ])
+  assert.equal(fires(reinvented, g), false)
+})
+check('silent when the candidate only became equivalent in this change', () => {
+  const before = 'export function formatMinorUnits(n: number) { return n / 10 }\n'
+  const after = 'export function formatMinorUnits(n: number) { return n / 100 }\n'
+  const g = ground([
+    { path: 'lib/currency.ts', before, after },
+    { path: 'utils/money.ts', after },
+  ])
+  assert.equal(fires(reinvented, g), false)
 })
 check('silent on a genuinely new name', () => {
   const g = ground([
@@ -196,6 +237,152 @@ check('silent on short and generic names', () => {
     { path: 'b/render.ts', after: 'export function render() { return 2 }\n' },
   ])
   assert.equal(fires(reinvented, g), false)
+})
+check('silent when only the helper name matches', () => {
+  const existing =
+    'export function runCheck(currentVersion: string, availableVersion: string) { return currentVersion !== availableVersion }\n'
+  const g = ground([
+    { path: 'web/use-app-updater.ts', before: existing, after: existing },
+    {
+      path: 'scripts/check-import-boundaries.mjs',
+      after: 'function runCheck({ srcRoot, allowlist }) { return allowlist.filter((entry) => !entry.startsWith(srcRoot)) }\n',
+    },
+  ])
+  assert.equal(fires(reinvented, g), false)
+})
+await checkAsync('silent across package boundaries', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-reinvented-scope-')))
+  try {
+    mkdirSync(join(dir, 'apps/web/src'), { recursive: true })
+    mkdirSync(join(dir, 'tools/scripts'), { recursive: true })
+    writeFileSync(join(dir, 'apps/web/package.json'), '{"name":"web","private":true}')
+    writeFileSync(join(dir, 'tools/scripts/package.json'), '{"name":"scripts","private":true}')
+    writeFileSync(
+      join(dir, 'tsconfig.json'),
+      '{"compilerOptions":{"allowJs":true},"include":["apps/**/*.mjs","tools/**/*.mjs"]}',
+    )
+    writeFileSync(
+      join(dir, 'apps/web/src/normalize.mjs'),
+      'export function normalizePayload(value) { return value.trim() }\n',
+    )
+    writeFileSync(
+      join(dir, 'tools/scripts/normalize.mjs'),
+      'function normalizePayload(value) { return value.trim() }\n',
+    )
+
+    const g = await buildGround(dir, [
+      { path: 'tools/scripts/normalize.mjs', added: new Set([1]) },
+    ])
+    assert.equal(fires(reinvented, g), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+await checkAsync('silent when only a new barrel alias gives the candidate a matching name', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-reinvented-alias-')))
+  try {
+    mkdirSync(join(dir, 'lib'), { recursive: true })
+    mkdirSync(join(dir, 'scripts'), { recursive: true })
+    writeFileSync(join(dir, 'package.json'), '{"name":"fixture","private":true}')
+    writeFileSync(join(dir, 'tsconfig.json'), '{"include":["lib/**/*.ts","scripts/**/*.ts"]}')
+    writeFileSync(
+      join(dir, 'lib/base.ts'),
+      'export function calculateVersion(current: string, available: string) { return current !== available }\n',
+    )
+    writeFileSync(join(dir, 'lib/index.ts'), "export { calculateVersion as runCheck } from './base.js'\n")
+    writeFileSync(
+      join(dir, 'scripts/run-check.ts'),
+      'function runCheck(current: string, available: string) { return current !== available }\n',
+    )
+
+    const g = await buildGround(dir, [
+      { path: 'lib/index.ts', added: new Set([1]), before: '' },
+      { path: 'scripts/run-check.ts', added: new Set([1]) },
+    ])
+    assert.equal(fires(reinvented, g), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+check('recognizes package boundaries for every declared language family', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-reinvented-markers-')))
+  try {
+    const packages: [string, string][] = [
+      ['typescript', 'package.json'],
+      ['python', 'pyproject.toml'],
+      ['rust', 'Cargo.toml'],
+      ['go', 'go.mod'],
+      ['jvm', 'build.gradle.kts'],
+      ['c-cpp', 'CMakeLists.txt'],
+      ['csharp', 'App.csproj'],
+      ['php', 'composer.json'],
+      ['ruby', 'Gemfile'],
+      ['solidity', 'foundry.toml'],
+    ]
+    for (const [name, marker] of packages) {
+      mkdirSync(join(dir, name, 'src'), { recursive: true })
+      writeFileSync(join(dir, name, marker), '')
+      assert.equal(reinventionScope(dir, name + '/src/file.txt'), name)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+check('implementation fingerprints cannot confuse token boundaries with token text', () => {
+  const oneToken = implementationFingerprint([{ type: '1', text: 'x\u00002\u0000y' }])
+  const twoTokens = implementationFingerprint([{ type: '1', text: 'x' }, { type: '2', text: 'y' }])
+  assert.notEqual(oneToken, twoTokens)
+})
+check('public CLI rejects the name-only repro and keeps an exact-match control', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-reinvented-cli-')))
+  const cli = join(process.cwd(), 'dist', 'cli.js')
+  const git = (...args: string[]): void => {
+    execFileSync('git', args, { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'] })
+  }
+  const run = (): { status: number | null; stdout: string; stderr: string } => {
+    const result = spawnSync(
+      process.execPath,
+      [cli, 'review', '--verify-only', '--checks', 'reinvented', '--from', 'HEAD~1', '--to', 'HEAD', '--format', 'compact'],
+      { cwd: dir, env: { ...process.env, CI: 'true' }, encoding: 'utf8' },
+    )
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr }
+  }
+  try {
+    git('init', '-q', '.')
+    git('config', 'user.name', 'PowerShot Tests')
+    git('config', 'user.email', 'tests@powershot.invalid')
+    mkdirSync(join(dir, 'src'), { recursive: true })
+    mkdirSync(join(dir, 'scripts'), { recursive: true })
+    writeFileSync(join(dir, 'package.json'), '{"name":"fixture","private":true}\n')
+    writeFileSync(
+      join(dir, 'tsconfig.json'),
+      '{"compilerOptions":{"allowJs":true},"include":["src/**/*.ts","scripts/**/*"]}\n',
+    )
+    const existing =
+      'export function runCheck(currentVersion: string, availableVersion: string) { return currentVersion !== availableVersion }\n'
+    writeFileSync(join(dir, 'src/use-app-updater.ts'), existing)
+    git('add', '.')
+    git('commit', '-q', '-m', 'base')
+
+    writeFileSync(
+      join(dir, 'scripts/check-import-boundaries.mjs'),
+      'function runCheck({ srcRoot, allowlist }) { return allowlist.filter((entry) => !entry.startsWith(srcRoot)) }\n',
+    )
+    git('add', '.')
+    git('commit', '-q', '-m', 'different helper with same name')
+    const nameOnly = run()
+    assert.equal(nameOnly.status, 0, nameOnly.stderr || nameOnly.stdout)
+    assert.doesNotMatch(nameOnly.stdout, /\[reinvented\]/)
+
+    writeFileSync(join(dir, 'scripts/duplicate.ts'), existing)
+    git('add', '.')
+    git('commit', '-q', '-m', 'exact duplicate')
+    const exact = run()
+    assert.equal(exact.status, 1, exact.stderr || exact.stdout)
+    assert.match(exact.stdout, /\[reinvented\]/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 console.log('\ndropped-guard')

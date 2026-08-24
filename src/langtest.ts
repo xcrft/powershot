@@ -8,8 +8,10 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { PACKS, parse } from './lang/packs.js'
-import { tokensFor } from './verifiers/foreign.js'
+import { Project } from 'ts-morph'
+import { PACKS, parse, type LanguagePack } from './lang/packs.js'
+import type { ChangedFile, ForeignFile, Ground } from './types.js'
+import { foreignReinvented, tokensFor } from './verifiers/foreign.js'
 
 /** each fixture: a handler that discards, one that genuinely handles, one explained */
 const FIXTURES: Record<string, string> = {
@@ -34,6 +36,80 @@ const HANDLED: Record<string, string> = {
   python: 'raise RuntimeError', go: 'return err', java: 'throw new RuntimeException',
   rust: 'return Err(e)', cpp: 'throw;', 'c#': 'throw;', php: 'throw $e',
   kotlin: 'throw e', ruby: 'raise', solidity: 'revert("x")',
+}
+
+const REINVENTED_NAME: Record<string, [string, string]> = {
+  python: ['def f():', 'def normalize_payload():'],
+  go: ['func F()', 'func NormalizePayload()'],
+  java: ['class A', 'class NormalizePayload'],
+  rust: ['fn f()', 'fn normalize_payload()'],
+  cpp: ['void f()', 'void normalizePayload()'],
+  c: ['int f(', 'int normalizePayload('],
+  'c#': ['class A', 'class NormalizePayload'],
+  php: ['function f()', 'function normalizePayload()'],
+  kotlin: ['fun f()', 'fun normalizePayload()'],
+  ruby: ['def f\n', 'def normalize_payload\n'],
+  solidity: ['contract A', 'contract NormalizePayload'],
+}
+
+const REINVENTED_MUTATION: Record<string, [string, string]> = {
+  python: ['a()', 'z()'],
+  go: ['a()', 'z()'],
+  java: ['a()', 'z()'],
+  rust: ['a()', 'z()'],
+  cpp: ['a()', 'z()'],
+  c: ['return n;', 'return n + 1;'],
+  'c#': ['A()', 'Z()'],
+  php: ['a()', 'z()'],
+  kotlin: ['a()', 'z()'],
+  ruby: ['    a\n', '    z\n'],
+  solidity: ['a()', 'z()'],
+}
+
+function allLines(source: string): Set<number> {
+  return new Set(Array.from({ length: source.split('\n').length }, (_, index) => index + 1))
+}
+
+async function foreignReinventionGround(
+  pack: LanguagePack,
+  existingSource: string,
+  addedSource: string,
+  existingBeforeSource: string | null = existingSource,
+  addedBeforeSource?: string,
+): Promise<Ground> {
+  const extension = pack.extensions[0]!
+  const existingPath = 'z-existing' + extension
+  const addedPath = 'a-new' + extension
+  const existingTree = await parse(pack, existingSource)
+  const addedTree = await parse(pack, addedSource)
+  const beforeTree = existingBeforeSource === null ? undefined : await parse(pack, existingBeforeSource)
+  const addedBeforeTree = addedBeforeSource === undefined ? undefined : await parse(pack, addedBeforeSource)
+  if (!existingTree || !addedTree) throw new Error('fixture did not parse')
+
+  const existingChange: ChangedFile = {
+    path: existingPath,
+    added: existingBeforeSource === null ? allLines(existingSource) : new Set(),
+    before: existingBeforeSource ?? undefined,
+  }
+  const addedChange: ChangedFile = { path: addedPath, added: allLines(addedSource), before: addedBeforeSource }
+  const foreign: ForeignFile[] = [
+    { path: existingPath, pack, tree: existingTree, beforeTree, changed: existingChange },
+    { path: addedPath, pack, tree: addedTree, beforeTree: addedBeforeTree, changed: addedChange },
+  ]
+  return {
+    root: '/virtual/repo',
+    sourceFiles: [],
+    configFiles: [],
+    beforeProject: new Project({ useInMemoryFileSystem: true }),
+    changed: [existingChange, addedChange],
+    files: [],
+    symbolIndex: new Map(),
+    deps: new Set(),
+    depsFor: () => new Set(),
+    typed: false,
+    internalPrefixes: [],
+    foreign,
+  }
 }
 
 async function one(name: string): Promise<number> {
@@ -82,6 +158,35 @@ async function one(name: string): Promise<number> {
     })
     check('leaves a properly handled error alone', () => {
       assert.equal(hits.some((h) => h.node.text.includes(HANDLED[name]!)), false, 'reported a real handler')
+    })
+  }
+
+  if (source && tree) {
+    const rename = REINVENTED_NAME[name]
+    const mutation = REINVENTED_MUTATION[name]
+    assert.ok(rename && mutation, 'no reinvention fixture written')
+    const existing = source.replace(rename[0], rename[1])
+    const different = existing.replace(mutation[0], mutation[1])
+    const differentGround = await foreignReinventionGround(pack, existing, different)
+    const identicalGround = await foreignReinventionGround(pack, existing, existing)
+    const bothNewGround = await foreignReinventionGround(pack, existing, existing, null)
+    const candidateChangedGround = await foreignReinventionGround(pack, existing, existing, different)
+    const targetPreexistingGround = await foreignReinventionGround(pack, existing, existing, existing, existing)
+
+    check('reinvented ignores a same-name different implementation', () => {
+      assert.equal(foreignReinvented.run(differentGround).length, 0)
+    })
+    check('reinvented detects an exact implementation already present in the base', () => {
+      assert.ok(foreignReinvented.run(identicalGround).length >= 1)
+    })
+    check('reinvented does not compare two declarations both added by the change', () => {
+      assert.equal(foreignReinvented.run(bothNewGround).length, 0)
+    })
+    check('reinvented ignores a candidate that only became equivalent in this change', () => {
+      assert.equal(foreignReinvented.run(candidateChangedGround).length, 0)
+    })
+    check('reinvented ignores an implementation already present in the changed file', () => {
+      assert.equal(foreignReinvented.run(targetPreexistingGround).length, 0)
     })
   }
   return failed

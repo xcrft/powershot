@@ -123,7 +123,7 @@ oracle is never counted as a pass in either profile.
 | `phantom-dep` | Imports absent from project manifests | Dependency manifests |
 | `phantom-config` | Configuration keys with no declared source | Repository config index |
 | `contract-drift` | Signature changes with callers left behind | Types and references |
-| `reinvented` | New helpers duplicating existing symbols | Symbol index |
+| `reinvented` | New callables that exactly repeat an implementation already present in the same package | Base symbol + token fingerprint |
 | `dropped-guard` | Removed guards, early returns, protective branches | Pre/post AST |
 | `swallowed-error` | Empty or ineffective error handling | AST shape |
 | `vacuous-test` | Tests that do not assert behavior | Test AST |
