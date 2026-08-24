@@ -11,7 +11,7 @@ function level(severity: Severity): 'error' | 'warning' | 'note' {
 const DESCRIPTIONS: Record<string, string> = {
   'phantom-api': 'Calls an API that does not exist — hallucinated method, property, or arity',
   'phantom-dep': 'Imports a package that is not a declared dependency',
-  reinvented: 'Declares a helper that already exists in the repository',
+  reinvented: 'Adds a callable whose token-identical implementation already existed in the same package',
   'dropped-guard': 'A guard present before the change is gone after it',
   'swallowed-error': 'Error handling that discards the failure',
   'vacuous-test': 'A test that asserts nothing, or mocks the unit under test',

@@ -74,7 +74,10 @@ export function finding(file: ForeignFile, node: Node, f: Omit<Finding, 'id' | '
  */
 export function declaredName(decl: Node, pack: LanguagePack): string | undefined {
   const field = decl.childForFieldName(pack.nodes.declarationName)
-  if (!field) return undefined
+  // tree-sitter-kotlin exposes the declaration identifier as a named child but
+  // assigns no field name to it. Keep the grammar field authoritative when one is
+  // present; otherwise the first identifier inside the declaration is its name.
+  if (!field) return nodesOfType(decl, pack.nodes.identifier)[0]?.text
   if (field.childCount === 0) return field.text
   // C and C++ wrap the name in a declarator; look inside that, never wider
   return nodesOfType(field, pack.nodes.identifier)[0]?.text

@@ -59,7 +59,7 @@ engine. The engine does not depend on a workflow provider or terminal layout.
 |---|---|---|
 | `src/cli/` | Argument parsing, command dispatch, report publication, exit mapping | Review algorithms |
 | `src/review.ts` | One review run and its stage orchestration | CLI parsing or presentation |
-| `src/ground.ts` | Change-scoped TypeScript projects, parse trees, manifests, symbol index | Check selection |
+| `src/ground.ts` | Change-scoped TypeScript projects, parse trees, manifests, base-aware implementation index | Check selection |
 | `src/plan.ts` | File selection and per-file capability accounting | Finding generation |
 | `src/manifest.ts` | Completion state and the authoritative run record | Rendering |
 | `src/verifiers/` | Deterministic check implementations | Model calls |

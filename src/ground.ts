@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import type { ChangedFile, ForeignFile, Ground } from './types.js'
 import { PACKS, packFor, parseIsolated } from './lang/packs.js'
 import { insideRepo, isSymlink, repoPath } from './fspolicy.js'
+import { createReinventionScopeResolver, typescriptImplementationFingerprint } from './reinvention.js'
 
 const CODE_EXT = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/
 const TS_CONFIG = /^tsconfig(?:\..+)?\.json$/i
@@ -314,7 +315,7 @@ export async function buildGround(root: string, changed: ChangedFile[], signal?:
     beforeProject,
     changed,
     files,
-    symbolIndex: buildSymbolIndex(sourceFiles, root),
+    symbolIndex: buildSymbolIndex(sourceFiles, root, changed, beforeProject),
     deps: depsFor(join(root, 'x.ts')),
     depsFor,
     typed,
@@ -458,33 +459,75 @@ async function parseForeign(root: string, changed: ChangedFile[], signal?: Abort
   })
 }
 
-function buildSymbolIndex(sourceFiles: SourceFile[], root: string): Ground['symbolIndex'] {
+function buildSymbolIndex(
+  sourceFiles: SourceFile[],
+  root: string,
+  changed: ChangedFile[],
+  beforeProject: Project,
+): Ground['symbolIndex'] {
   const index: Ground['symbolIndex'] = new Map()
+  const changes = new Map(changed.map((file) => [file.path, file]))
+  const scopeFor = createReinventionScopeResolver(root)
+  const relevantNames = new Set<string>()
+  for (const sf of sourceFiles) {
+    const rel = repoPath(root, String(sf.getFilePath()))
+    if (!changes.has(rel)) continue
+    for (const declaration of sf.getFunctions()) {
+      const name = declaration.getName()
+      if (name) relevantNames.add(normalizeName(name))
+    }
+    for (const declaration of sf.getVariableDeclarations()) {
+      const initializer = declaration.getInitializer()
+      if (initializer?.isKind(SyntaxKind.ArrowFunction) || initializer?.isKind(SyntaxKind.FunctionExpression)) {
+        relevantNames.add(normalizeName(declaration.getName()))
+      }
+    }
+  }
   for (const sf of sourceFiles) {
     const path = String(sf.getFilePath())
     // the project glob follows symlinked directories, so what it loaded is not
     // proof of where the file is
     if (path.includes('/node_modules/') || !insideRepo(root, path)) continue
     for (const [name, decls] of sf.getExportedDeclarations()) {
+      const key = normalizeName(name)
+      // Fingerprint only names the change could have introduced. This keeps index
+      // construction proportional to the diff even when the project closure is a
+      // very large monorepo.
+      if (!relevantNames.has(key)) continue
       const decl = decls[0]
       if (!decl) continue
       // only index things that could plausibly be reimplemented
       const kind = decl.getKind()
       if (
         kind !== SyntaxKind.FunctionDeclaration &&
-        kind !== SyntaxKind.VariableDeclaration &&
-        kind !== SyntaxKind.ClassDeclaration
+        kind !== SyntaxKind.VariableDeclaration
       )
         continue
-      // a barrel re-exports another module's symbol, so record where it is actually
-      // declared — otherwise `export * from './x'` makes every symbol look duplicated
+      const fingerprint = typescriptImplementationFingerprint(decl)
+      if (!fingerprint) continue
+      // A barrel alias can be new in this change even when its underlying callable
+      // predates it. Index the declaration from its own module, where both its name
+      // and base existence can be proved, rather than manufacturing history for the
+      // new alias or recording every `export *` as another copy.
+      if (decl.getSourceFile() !== sf) continue
       const declPath = String(decl.getSourceFile().getFilePath())
       if (declPath.includes('/node_modules/') || !insideRepo(root, declPath)) continue
       const rel = repoPath(root, declPath)
-      const key = normalizeName(name)
+      const change = changes.get(rel)
+      const before = change?.before === undefined ? undefined : beforeProject.getSourceFile('/before/' + rel)
+      const existedInBase = change === undefined || (before?.getExportedDeclarations().get(name) ?? []).some(
+        (baseDeclaration) => typescriptImplementationFingerprint(baseDeclaration) === fingerprint,
+      )
       const list = index.get(key) ?? []
       if (list.some((e) => e.file === rel && e.line === decl.getStartLineNumber())) continue
-      list.push({ file: rel, name, line: decl.getStartLineNumber() })
+      list.push({
+        file: rel,
+        name,
+        line: decl.getStartLineNumber(),
+        fingerprint,
+        existedInBase,
+        scope: scopeFor(rel),
+      })
       index.set(key, list)
     }
   }

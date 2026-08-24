@@ -1,6 +1,7 @@
 import { SyntaxKind, type SourceFile } from 'ts-morph'
 import type { Finding, Ground, Verifier } from '#app/types.js'
 import { locate, normalizeName, relPath } from '#app/ground.js'
+import { createReinventionScopeResolver, typescriptImplementationFingerprint } from '#app/reinvention.js'
 
 /**
  * Names too generic to mean anything across files — two `render`s are usually
@@ -14,21 +15,27 @@ const GENERIC = new Set([
   'parse', 'format', 'load', 'save', 'toString', 'default', 'config', 'options',
 ])
 
-type Declared = { name: string; line: number; span: { column: number; length: number } }
+type Declared = { name: string; line: number; span: { column: number; length: number }; fingerprint: string }
 
 function declaredNames(sf: SourceFile): Declared[] {
   const out: Declared[] = []
   for (const fn of sf.getFunctions()) {
     const name = fn.getName()
     const id = fn.getNameNode()
-    if (name && id) out.push({ name, line: fn.getStartLineNumber(), span: locate(sf, id.getStart(), id.getWidth()).span })
+    const fingerprint = typescriptImplementationFingerprint(fn)
+    if (name && id && fingerprint) {
+      out.push({ name, line: fn.getStartLineNumber(), span: locate(sf, id.getStart(), id.getWidth()).span, fingerprint })
+    }
   }
   for (const v of sf.getVariableDeclarations()) {
     const init = v.getInitializer()
     if (!init) continue
     if (init.isKind(SyntaxKind.ArrowFunction) || init.isKind(SyntaxKind.FunctionExpression)) {
       const id = v.getNameNode()
-      out.push({ name: v.getName(), line: v.getStartLineNumber(), span: locate(sf, id.getStart(), id.getWidth()).span })
+      const fingerprint = typescriptImplementationFingerprint(v)
+      if (fingerprint) {
+        out.push({ name: v.getName(), line: v.getStartLineNumber(), span: locate(sf, id.getStart(), id.getWidth()).span, fingerprint })
+      }
     }
   }
   return out
@@ -40,17 +47,31 @@ export const reinvented: Verifier = {
   needs: ['syntax'],
   run(g: Ground): Finding[] {
     const findings: Finding[] = []
-    for (const { sf, changed } of g.files) {
+    const scopeFor = createReinventionScopeResolver(g.root)
+    for (const { sf, changed, before } of g.files) {
       const file = relPath(sf, g.root)
+      const scope = scopeFor(file)
       // a fixture builder repeated across test files is a deliberate trade, and two
       // tests describing the same scenario naturally share a name
       if (TEST_FILE.test(file)) continue
-      for (const { name, line, span } of declaredNames(sf)) {
+      const baseDeclarations = before ? declaredNames(before) : []
+      for (const { name, line, span, fingerprint } of declaredNames(sf)) {
         if (!changed.added.has(line)) continue
         if (name.length < 6 || GENERIC.has(name) || GENERIC.has(name.toLowerCase())) continue
+        const existedHere = baseDeclarations.some(
+          (declaration) =>
+            normalizeName(declaration.name) === normalizeName(name) &&
+            declaration.fingerprint === fingerprint,
+        )
+        if (existedHere) continue
 
-        const existing = (g.symbolIndex.get(normalizeName(name)) ?? []).filter((s) => s.file !== file)
-        const match = existing[0]
+        const match = (g.symbolIndex.get(normalizeName(name)) ?? []).find(
+          (symbol) =>
+            symbol.file !== file &&
+            symbol.existedInBase &&
+            symbol.scope === scope &&
+            symbol.fingerprint === fingerprint,
+        )
         if (!match) continue
 
         findings.push({
@@ -62,12 +83,15 @@ export const reinvented: Verifier = {
           file,
           line,
           span,
-          title: name + '() duplicates an existing export ' + match.file + ':' + match.name,
-          evidence: { oracle: 'repo symbol index', detail: 'already exported from ' + match.file + ':' + match.line },
+          title: name + '() repeats the implementation at ' + match.file + ':' + match.name,
+          evidence: {
+            oracle: 'base export + callable token fingerprint',
+            detail: 'token-identical implementation already exported from ' + match.file + ':' + match.line,
+          },
           // Deliberately not an import statement: the correct specifier depends on the
           // repo's module resolution, and a wrong one would be exactly the kind of
           // confidently-wrong output this tool exists to catch.
-          fix: 'Reuse ' + match.name + ' from ' + match.file + ' instead of redeclaring it',
+          fix: 'Consider reusing ' + match.name + ' from ' + match.file + '; if the separation is intentional, keep the boundary explicit',
         })
       }
     }
