@@ -36,6 +36,10 @@ export type Finding = {
 
 export type ChangedFile = {
   path: string
+  /** Repository path at the base ref when Git detected a rename or copy. */
+  beforePath?: string
+  /** The path has no current source to review, but its removal still affects proofs. */
+  deleted?: boolean
   added: Set<number>
   /** undefined for a newly added file */
   before?: string
@@ -59,6 +63,8 @@ export type Ground = {
   /** syntax-only, holding the base-ref version of each changed file */
   beforeProject: Project
   changed: ChangedFile[]
+  /** Complete diff inventory, including policy-waived and deleted paths. */
+  inventory?: ChangedFile[]
   /** `typed` is per file: a configured project supplies a resolved ambient environment */
   files: { sf: SourceFile; changed: ChangedFile; before?: SourceFile; typed: boolean }[]
   /** normalized name -> where a token-identical callable already lives */

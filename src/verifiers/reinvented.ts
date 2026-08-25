@@ -17,12 +17,12 @@ const GENERIC = new Set([
 
 type Declared = { name: string; line: number; span: { column: number; length: number }; fingerprint: string }
 
-function declaredNames(sf: SourceFile): Declared[] {
+function declaredNames(sf: SourceFile, bindingPath: string): Declared[] {
   const out: Declared[] = []
   for (const fn of sf.getFunctions()) {
     const name = fn.getName()
     const id = fn.getNameNode()
-    const fingerprint = typescriptImplementationFingerprint(fn)
+    const fingerprint = typescriptImplementationFingerprint(fn, bindingPath)
     if (name && id && fingerprint) {
       out.push({ name, line: fn.getStartLineNumber(), span: locate(sf, id.getStart(), id.getWidth()).span, fingerprint })
     }
@@ -32,7 +32,7 @@ function declaredNames(sf: SourceFile): Declared[] {
     if (!init) continue
     if (init.isKind(SyntaxKind.ArrowFunction) || init.isKind(SyntaxKind.FunctionExpression)) {
       const id = v.getNameNode()
-      const fingerprint = typescriptImplementationFingerprint(v)
+      const fingerprint = typescriptImplementationFingerprint(v, bindingPath)
       if (fingerprint) {
         out.push({ name: v.getName(), line: v.getStartLineNumber(), span: locate(sf, id.getStart(), id.getWidth()).span, fingerprint })
       }
@@ -54,9 +54,10 @@ export const reinvented: Verifier = {
       // a fixture builder repeated across test files is a deliberate trade, and two
       // tests describing the same scenario naturally share a name
       if (TEST_FILE.test(file)) continue
-      const baseDeclarations = before ? declaredNames(before) : []
-      for (const { name, line, span, fingerprint } of declaredNames(sf)) {
+      const baseDeclarations = before ? declaredNames(before, changed.beforePath ?? file) : []
+      for (const { name, line, span, fingerprint } of declaredNames(sf, file)) {
         if (!changed.added.has(line)) continue
+        if (changed.beforePath && changed.beforePath !== changed.path) continue
         if (name.length < 6 || GENERIC.has(name) || GENERIC.has(name.toLowerCase())) continue
         const existedHere = baseDeclarations.some(
           (declaration) =>

@@ -53,7 +53,12 @@ import { summarizeRun } from './report/summary.js'
 import { wrap } from './report/terminal.js'
 import { highlight, isJsx } from './report/highlight.js'
 import { buildGround, normalizeName, readEnvManifest, relPath } from './ground.js'
-import { implementationFingerprint, reinventionScope, typescriptImplementationFingerprint } from './reinvention.js'
+import {
+  exportedDeclarations,
+  implementationFingerprint,
+  reinventionScope,
+  typescriptImplementationFingerprint,
+} from './reinvention.js'
 import { incompleteReasons } from './bench.js'
 import { PACKAGE_NAME, PACKAGE_VERSION } from './package-meta.js'
 import {
@@ -83,7 +88,10 @@ import {
 const root = '/repo'
 
 /** Build a Ground by hand so verifiers are testable without git or a real repo. */
-function ground(files: { path: string; after: string; before?: string }[], deps: string[] = []): Ground {
+function ground(
+  files: { path: string; after: string; before?: string; beforePath?: string }[],
+  deps: string[] = [],
+): Ground {
   const project = new Project({ useInMemoryFileSystem: true })
   const beforeProject = new Project({ useInMemoryFileSystem: true })
 
@@ -95,6 +103,7 @@ function ground(files: { path: string; after: string; before?: string }[], deps:
     const lineCount = f.after.split('\n').length
     const c: ChangedFile = {
       path: f.path,
+      beforePath: f.beforePath,
       added: new Set(Array.from({ length: lineCount }, (_, i) => i + 1)),
       before: f.before,
     }
@@ -102,7 +111,9 @@ function ground(files: { path: string; after: string; before?: string }[], deps:
     entries.push({
       sf,
       changed: c,
-      before: f.before === undefined ? undefined : beforeProject.createSourceFile('/before/' + f.path, f.before, { overwrite: true }),
+      before: f.before === undefined
+        ? undefined
+        : beforeProject.createSourceFile('/before/' + (f.beforePath ?? f.path), f.before, { overwrite: true }),
       typed: true,
     })
   }
@@ -111,17 +122,20 @@ function ground(files: { path: string; after: string; before?: string }[], deps:
   for (const sf of project.getSourceFiles()) {
     const rel = sf.getFilePath().slice(root.length + 1)
     const input = files.find((file) => file.path === rel)
-    for (const [name, decls] of sf.getExportedDeclarations()) {
-      const decl = decls[0]
-      if (!decl) continue
-      const fingerprint = typescriptImplementationFingerprint(decl)
+    for (const { name, node: decl } of exportedDeclarations(sf)) {
+      const fingerprint = typescriptImplementationFingerprint(decl, rel)
       if (!fingerprint) continue
       const key = normalizeName(name)
       const list = symbolIndex.get(key) ?? []
-      const before = input?.before === undefined ? undefined : beforeProject.getSourceFile('/before/' + rel)
-      const existedInBase = (before?.getExportedDeclarations().get(name) ?? []).some(
-        (baseDeclaration) => typescriptImplementationFingerprint(baseDeclaration) === fingerprint,
-      )
+      const beforePath = input?.beforePath ?? rel
+      const before = input?.before === undefined ? undefined : beforeProject.getSourceFile('/before/' + beforePath)
+      const existedInBase = before && reinventionScope(root, beforePath) === reinventionScope(root, rel)
+        ? exportedDeclarations(before).some(
+        (baseDeclaration) =>
+          baseDeclaration.name === name &&
+          typescriptImplementationFingerprint(baseDeclaration.node, beforePath) === fingerprint,
+        )
+        : false
       list.push({
         file: rel,
         name,
@@ -163,6 +177,28 @@ function fires(v: Verifier, g: Ground): boolean {
   return v.run(g).length > 0
 }
 
+async function javascriptReinvention(candidate: string): Promise<boolean> {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-javascript-reinvention-')))
+  try {
+    mkdirSync(join(dir, 'lib'), { recursive: true })
+    mkdirSync(join(dir, 'utils'), { recursive: true })
+    writeFileSync(join(dir, 'package.json'), '{"name":"fixture","private":true}')
+    writeFileSync(
+      join(dir, 'tsconfig.json'),
+      '{"compilerOptions":{"allowJs":true},"include":["lib/**/*.mjs","utils/**/*.mjs"]}',
+    )
+    writeFileSync(
+      join(dir, 'lib/normalize.mjs'),
+      'export function normalizePayload(value) { return value.trim() }\n',
+    )
+    writeFileSync(join(dir, 'utils/normalize.mjs'), candidate)
+    const g = await buildGround(dir, [{ path: 'utils/normalize.mjs', added: new Set([1]) }])
+    return fires(reinvented, g)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 console.log('\nphantom-dep')
 check('fires on an import that is not a declared dependency', () => {
   const g = ground([{ path: 'a.ts', after: "import ky from 'ky'\nexport const x = ky\n" }], ['zod'])
@@ -189,6 +225,17 @@ check('resolves a scoped subpath to its package', () => {
 })
 
 console.log('\nreinvented')
+check('keeps every public alias for one exported declaration', () => {
+  const project = new Project({ useInMemoryFileSystem: true })
+  const source = project.createSourceFile(
+    '/aliases.mjs',
+    'function helper(value) { return value }\nexport { helper, helper as normalizePayload }\n',
+  )
+  assert.deepEqual(
+    exportedDeclarations(source).map((declaration) => declaration.name).sort(),
+    ['helper', 'normalizePayload'],
+  )
+})
 check('fires when a helper already exists elsewhere', () => {
   const existing = 'export function formatMinorUnits(n: number) { return n / 100 }\n'
   const g = ground([
@@ -198,6 +245,81 @@ check('fires when a helper already exists elsewhere', () => {
   const found = reinvented.run(g)
   assert.ok(found.length >= 1, 'expected a duplication finding')
   assert.equal(found[0]!.confidence, 'firm') // heuristic, never claims `proven`
+})
+await checkAsync('fires on an exact JavaScript helper already present in the base', async () => {
+  assert.equal(
+    await javascriptReinvention('export function normalizePayload(value) { return value.trim() }\n'),
+    true,
+  )
+})
+await checkAsync('silent on a same-name JavaScript helper with different behavior', async () => {
+  assert.equal(
+    await javascriptReinvention('export function normalizePayload(value) { return JSON.stringify(value) }\n'),
+    false,
+  )
+})
+check('binds an implementation fingerprint to its import source', () => {
+  const existing = [
+    "import { transform } from './alpha.js'",
+    'export function normalizePayload(value: string) { return transform(value) }',
+    '',
+  ].join('\n')
+  const same = ground([
+    { path: 'lib/existing.ts', before: existing, after: existing },
+    { path: 'lib/added.ts', after: existing },
+  ])
+  const different = ground([
+    { path: 'lib/existing.ts', before: existing, after: existing },
+    { path: 'lib/added.ts', after: existing.replace("'./alpha.js'", "'./beta.js'") },
+  ])
+  assert.equal(fires(reinvented, same), true)
+  assert.equal(fires(reinvented, different), false)
+})
+check('binds an implementation fingerprint to referenced module locals', () => {
+  const source = (factor: number): string => [
+    'const FACTOR = ' + factor,
+    'export function scalePayload(value: number) { return value * FACTOR }',
+    '',
+  ].join('\n')
+  const same = ground([
+    { path: 'lib/existing.ts', before: source(2), after: source(2) },
+    { path: 'lib/added.ts', after: source(2) },
+  ])
+  const different = ground([
+    { path: 'lib/existing.ts', before: source(2), after: source(2) },
+    { path: 'lib/added.ts', after: source(3) },
+  ])
+  assert.equal(fires(reinvented, same), true)
+  assert.equal(fires(reinvented, different), false)
+})
+check('qualifies relative imports by their source directory', () => {
+  const source = [
+    "import { transform } from './transform.js'",
+    'export function normalizePayload(value: string) { return transform(value) }',
+    '',
+  ].join('\n')
+  const sameDirectory = ground([
+    { path: 'lib/existing.ts', before: source, after: source },
+    { path: 'lib/added.ts', after: source },
+  ])
+  const differentDirectory = ground([
+    { path: 'alpha/existing.ts', before: source, after: source },
+    { path: 'beta/added.ts', after: source },
+  ])
+  assert.equal(fires(reinvented, sameDirectory), true)
+  assert.equal(fires(reinvented, differentDirectory), false)
+})
+check('binds an implementation fingerprint to TypeScript reference directives', () => {
+  const source = (target: string): string => [
+    '/// <reference path="' + target + '" />',
+    'export function normalizePayload(value: Payload) { return value }',
+    '',
+  ].join('\n')
+  const g = ground([
+    { path: 'lib/existing.ts', before: source('./alpha.d.ts'), after: source('./alpha.d.ts') },
+    { path: 'lib/added.ts', after: source('./beta.d.ts') },
+  ])
+  assert.equal(fires(reinvented, g), false)
 })
 check('silent when matching helpers are both new in the change', () => {
   const added = 'export function formatMinorUnits(n: number) { return n / 100 }\n'
@@ -394,10 +516,32 @@ check('fires when an early-return guard disappears', () => {
   assert.equal(found.length, 1)
   assert.match(found[0]!.title, /!inv\.customer/)
 })
+check('fires when a JavaScript early-return guard disappears', () => {
+  const before = 'export function release(slot) {\n  if (!slot.ready()) return false\n  return slot.close()\n}\n'
+  const after = 'export function release(slot) {\n  return slot.close()\n}\n'
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.mjs', after, before }])), true)
+})
+check('silent when JavaScript moves the guarded operation into a helper', () => {
+  const before = 'export function release(slot) {\n  if (!slot.ready()) return false\n  return slot.close()\n}\n'
+  const after = [
+    'export function release(slot) { return closeIfReady(slot) }',
+    'function closeIfReady(slot) {',
+    '  if (!slot.ready()) return false',
+    '  return slot.close()',
+    '}',
+    '',
+  ].join('\n')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.mjs', after, before }])), false)
+})
 check('fires when a throwing guard disappears', () => {
   const before = 'export function pay(a: any) {\n  if (a <= 0) { throw new Error("bad") }\n  return a\n}\n'
   const after = 'export function pay(a: any) {\n  return a\n}\n'
   assert.equal(fires(droppedGuard, ground([{ path: 'pay.ts', after, before }])), true)
+})
+check('fires inside an arrow function', () => {
+  const before = 'export const release = (slot: any) => {\n  if (!slot.ready()) return false\n  return slot.close()\n}\n'
+  const after = 'export const release = (slot: any) => {\n  return slot.close()\n}\n'
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), true)
 })
 check('silent when the guard is kept, even if reformatted', () => {
   const before = 'export function close(inv: any) {\n  if (!inv.customer) return null\n  return inv.total\n}\n'
@@ -410,6 +554,261 @@ check('silent when a rewrite respells the same guard for a new type', () => {
   const before = 'export function check(pool: any[]) {\n  if (pool.length === 0) return null\n  return pool\n}\n'
   const after = 'export function check(pool: number) {\n  if (pool === 0) return null\n  return pool\n}\n'
   assert.equal(fires(droppedGuard, ground([{ path: 'c.ts', after, before }])), false)
+})
+check('silent when the callable contract narrows with the removed guard', () => {
+  const before = [
+    'export function release(slot: { close(): boolean } | null) {',
+    '  if (!slot) return false',
+    '  return slot.close()',
+    '}',
+    '',
+  ].join('\n')
+  const after = [
+    'export function release(slot: { close(): boolean }) {',
+    '  return slot.close()',
+    '}',
+    '',
+  ].join('\n')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('silent when the callable owner contract narrows with the removed guard', () => {
+  const before = [
+    'export class Batch<T extends { close(): boolean } | null> {',
+    '  release(slot: T) {',
+    '    if (!slot) return false',
+    '    return slot.close()',
+    '  }',
+    '}',
+    '',
+  ].join('\n')
+  const after = [
+    'export class Batch<T extends { close(): boolean }> {',
+    '  release(slot: T) {',
+    '    return slot.close()',
+    '  }',
+    '}',
+    '',
+  ].join('\n')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('fires when an unchanged outer branch still contains the guard-only deletion', () => {
+  const before = [
+    'export function release(slot: any, enabled: boolean) {',
+    '  if (enabled) {',
+    '    if (!slot) return false',
+    '    return slot.close()',
+    '  }',
+    '  return true',
+    '}',
+    '',
+  ].join('\n')
+  const after = before.replace('    if (!slot) return false\n', '')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), true)
+})
+check('silent when an outer branch is strengthened as the inner guard is removed', () => {
+  const before = [
+    'export function release(slot: any, enabled: boolean) {',
+    '  if (enabled) {',
+    '    if (!slot) return false',
+    '    return slot.close()',
+    '  }',
+    '  return true',
+    '}',
+    '',
+  ].join('\n')
+  const after = before
+    .replace('if (enabled)', 'if (enabled && slot)')
+    .replace('    if (!slot) return false\n', '')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('silent when a sibling statement changes as a nested guard is removed', () => {
+  const before = [
+    'export function release(slot: any, enabled: boolean) {',
+    '  observe(slot)',
+    '  if (enabled) {',
+    '    if (!slot) return false',
+    '    return slot.close()',
+    '  }',
+    '  return true',
+    '}',
+    '',
+  ].join('\n')
+  const after = before
+    .replace('observe(slot)', 'ensureSlot(slot)')
+    .replace('    if (!slot) return false\n', '')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('silent when an import binding changes as its guard is removed', () => {
+  const before = [
+    "import type { Slot } from './alpha.js'",
+    'export function release(slot: Slot | null) {',
+    '  if (!slot) return false',
+    '  return slot.close()',
+    '}',
+    '',
+  ].join('\n')
+  const after = before
+    .replace("'./alpha.js'", "'./beta.js'")
+    .replace('  if (!slot) return false\n', '')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('silent when a module type changes as its guard is removed', () => {
+  const before = [
+    'type Slot = { close(): boolean } | null',
+    'export function release(slot: Slot) {',
+    '  if (!slot) return false',
+    '  return slot.close()',
+    '}',
+    '',
+  ].join('\n')
+  const after = before
+    .replace(' | null', '')
+    .replace('  if (!slot) return false\n', '')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('silent when the same guard still protects the callable', () => {
+  const before = [
+    'export function release(slot: any) {',
+    '  if (!slot.ready()) return false',
+    '  if (slot.shouldClose()) {',
+    '    if (!slot.ready()) return false',
+    '    return slot.close()',
+    '  }',
+    '  return true',
+    '}',
+    '',
+  ].join('\n')
+  const after = before.replace('    if (!slot.ready()) return false\n', '')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('matches remaining guards by tokens rather than comments', () => {
+  const before = [
+    'export function release(slot: any, enabled: boolean) {',
+    '  if (!slot /* already checked */) return false',
+    '  if (enabled) {',
+    '    if (!slot) return false',
+    '    return slot.close()',
+    '  }',
+    '  return true',
+    '}',
+    '',
+  ].join('\n')
+  const after = before.replace('    if (!slot) return false\n', '')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('silent when the guarded operation moves behind a helper', () => {
+  const before = [
+    'export function release(slot: any) {',
+    '  if (!slot.ready()) return false',
+    '  return slot.close()',
+    '}',
+    '',
+  ].join('\n')
+  const after = [
+    'export function release(slot: any) {',
+    '  return closeIfReady(slot)',
+    '}',
+    'function closeIfReady(slot: any) {',
+    '  if (!slot.ready()) return false',
+    '  return slot.close()',
+    '}',
+    '',
+  ].join('\n')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('silent when an already-called helper absorbs the guard', () => {
+  const before = [
+    'function closeSlot(slot: any) { return slot.close() }',
+    'export function release(slot: any) {',
+    '  if (!slot.ready()) return false',
+    '  return closeSlot(slot)',
+    '}',
+    '',
+  ].join('\n')
+  const after = [
+    'function closeSlot(slot: any) {',
+    '  if (!slot.ready()) return false',
+    '  return slot.close()',
+    '}',
+    'export function release(slot: any) {',
+    '  return closeSlot(slot)',
+    '}',
+    '',
+  ].join('\n')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('silent when a nested callable binding changes with the guard deletion', () => {
+  const before = [
+    'export function release(slot: any, fallback: any) {',
+    '  function closeSlot(value = slot) { return value.close() }',
+    '  if (!slot) return false',
+    '  return closeSlot()',
+    '}',
+    '',
+  ].join('\n')
+  const after = before
+    .replace('value = slot', 'value = fallback')
+    .replace('  if (!slot) return false\n', '')
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('silent when a guarded file is renamed as the guard is deleted', () => {
+  const before = 'export function release(slot: any) {\n  if (!slot) return false\n  return slot.close()\n}\n'
+  const after = 'export function release(slot: any) {\n  return slot.close()\n}\n'
+  assert.equal(
+    fires(droppedGuard, ground([{ path: 'new/release.ts', beforePath: 'old/release.ts', after, before }])),
+    false,
+  )
+})
+check('silent when another source is renamed to an unsupported suffix', () => {
+  const before = 'export function release(slot: any) {\n  if (!slot) return false\n  return slot.close()\n}\n'
+  const after = 'export function release(slot: any) {\n  return slot.close()\n}\n'
+  const g = ground([{ path: 'release.ts', after, before }])
+  g.inventory = [
+    ...g.changed,
+    {
+      path: 'notes/helper.txt',
+      beforePath: 'src/helper.ts',
+      added: new Set(),
+      before: 'export function closeSlot(slot: any) { return slot.close() }\n',
+    },
+  ]
+  assert.equal(fires(droppedGuard, g), false)
+})
+check('silent when a TypeScript reference directive changes with the guard deletion', () => {
+  const before = 'export function release(slot: any) {\n  if (!slot) return false\n  return slot.close()\n}\n'
+  const after = 'export function release(slot: any) {\n  return slot.close()\n}\n'
+  const refs = (target: string): string => '/// <reference path="' + target + '" />\nexport const stable = true\n'
+  const g = ground([
+    { path: 'release.ts', after, before },
+    { path: 'bindings.ts', after: refs('./beta.d.ts'), before: refs('./alpha.d.ts') },
+  ])
+  assert.equal(fires(droppedGuard, g), false)
+})
+check('silent when a branch only conditionally returns', () => {
+  const before = [
+    'export function release(slot: any, force: boolean) {',
+    '  if (!slot.ready()) {',
+    '    if (force) return false',
+    '    slot.recordMiss()',
+    '  }',
+    '  return slot.close()',
+    '}',
+    '',
+  ].join('\n')
+  const after = 'export function release(slot: any, force: boolean) {\n  return slot.close()\n}\n'
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
+})
+check('silent when the removed conditional had an else branch', () => {
+  const before = [
+    'export function release(slot: any) {',
+    '  if (!slot.ready()) return false',
+    '  else slot.recordReady()',
+    '  return slot.close()',
+    '}',
+    '',
+  ].join('\n')
+  const after = 'export function release(slot: any) {\n  return slot.close()\n}\n'
+  assert.equal(fires(droppedGuard, ground([{ path: 'release.ts', after, before }])), false)
 })
 check('silent when the guard became obsolete with the code it protected', () => {
   // found by bench: formatWeight moved from ounces to grams, so the old guards
@@ -780,8 +1179,53 @@ check('Git paths are read as NUL-delimited data and passed back literally', () =
     const changes = collectChanges(dir, {})
     const moved = changes.find((change) => change.path === renamed)
     assert.ok(moved?.before?.includes('before9'))
+    assert.equal(moved?.beforePath, tracked)
     assert.deepEqual([...moved!.added], [10])
     assert.ok(changes.some((change) => change.path === untracked))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+await checkAsync('deleted and policy-waived source stays in guard proof inventory', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-deleted-proof-')))
+  const run = (...args: string[]): void => {
+    execFileSync('git', args, { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'] })
+  }
+  try {
+    run('init', '-q', '.')
+    run('config', 'user.email', 'tests@powershot.invalid')
+    run('config', 'user.name', 'PowerShot Tests')
+    mkdirSync(join(dir, 'src'), { recursive: true })
+    mkdirSync(join(dir, 'ignored'), { recursive: true })
+    const guarded = 'export function release(slot: any) {\n  if (!slot) return false\n  return slot.close()\n}\n'
+    const helper = 'export function closeSlot(slot: any) { return slot.close() }\n'
+    writeFileSync(join(dir, 'src/release.ts'), guarded)
+    writeFileSync(join(dir, 'ignored/helper.ts'), helper)
+    run('add', '.')
+    run('commit', '-qm', 'base')
+
+    writeFileSync(
+      join(dir, 'src/release.ts'),
+      'export function release(slot: any) {\n  return slot.close()\n}\n',
+    )
+    rmSync(join(dir, 'ignored/helper.ts'))
+
+    const changes = collectChanges(dir, {})
+    const deleted = changes.find((change) => change.path === 'ignored/helper.ts')
+    assert.equal(deleted?.deleted, true)
+    assert.equal(deleted?.before, helper)
+    assert.equal(deleted?.added.size, 0)
+
+    const result = await review({
+      root: dir,
+      range: {},
+      config: { ...loadConfig(dir), ignore: ['ignored/**'] },
+      verifyOnly: true,
+      checks: ['dropped-guard'],
+    })
+    assert.equal(result.findings.some((finding) => finding.check === 'dropped-guard'), false)
+    const deletedPlan = result.plan?.items().find((item) => item.path === 'ignored/helper.ts')
+    assert.equal(deletedPlan?.disposition, 'waived')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

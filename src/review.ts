@@ -212,7 +212,7 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
   const budget = opts.budget ?? new Budget()
   const manifest = opts.manifest
   const groundDone = stage('ground')
-  const g = await buildGround(root, changed, opts.signal)
+  const g = await buildGround(root, changed, opts.signal, all)
   groundDone(
     g.sourceFiles.length + ' files · ' + g.symbolIndex.size + ' symbols' +
       (g.configFiles.length === 0
@@ -242,6 +242,10 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
   // whatever the summary says about the ones that were
   const grounded = new Set([...g.files.map((f) => f.changed.path), ...g.foreign.map((f) => f.path)])
   for (const c of changed) {
+    if (c.deleted) {
+      plan.waive(c.path, 'deleted file has no current source to review')
+      continue
+    }
     if (grounded.has(c.path)) continue
     if (packFor(c.path)) plan.fail(c.path, 'declared language parser unavailable')
     else plan.waive(c.path, 'no parser for this language')

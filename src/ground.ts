@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import type { ChangedFile, ForeignFile, Ground } from './types.js'
 import { PACKS, packFor, parseIsolated } from './lang/packs.js'
 import { insideRepo, isSymlink, repoPath } from './fspolicy.js'
-import { createReinventionScopeResolver, typescriptImplementationFingerprint } from './reinvention.js'
+import { createReinventionScopeResolver, exportedDeclarations, typescriptImplementationFingerprint } from './reinvention.js'
 
 const CODE_EXT = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/
 const TS_CONFIG = /^tsconfig(?:\..+)?\.json$/i
@@ -243,7 +243,12 @@ function makeDepsFor(root: string): (absPath: string) => Set<string> {
  * packages, a syntax-only project for unconfigured changes and the base-ref trees,
  * and one deduplicated symbol index over the relevant project closures.
  */
-export async function buildGround(root: string, changed: ChangedFile[], signal?: AbortSignal): Promise<Ground> {
+export async function buildGround(
+  root: string,
+  changed: ChangedFile[],
+  signal?: AbortSignal,
+  inventory: ChangedFile[] = changed,
+): Promise<Ground> {
   root = resolve(root)
   const directoryCache = new Map<string, string[]>()
   const projectCache = new Map<string, ConfiguredProject | undefined>()
@@ -279,6 +284,7 @@ export async function buildGround(root: string, changed: ChangedFile[], signal?:
   }
 
   const beforeProject = new Project({ useInMemoryFileSystem: true })
+  const beforeSources = new Map<string, SourceFile>()
   const files: Ground['files'] = []
   for (const c of changed) {
     if (!CODE_EXT.test(c.path)) continue
@@ -287,8 +293,12 @@ export async function buildGround(root: string, changed: ChangedFile[], signal?:
     const configured = assigned.get(c.path)
     const sf = configured?.project.getSourceFile(abs) ?? syntaxProject.getSourceFile(abs)
     if (!sf) continue
-    const before =
-      c.before === undefined ? undefined : beforeProject.createSourceFile(`/before/${c.path}`, c.before, { overwrite: true })
+    const beforeKey = c.beforePath ?? c.path
+    let before = c.before === undefined ? undefined : beforeSources.get(beforeKey)
+    if (c.before !== undefined && !before) {
+      before = beforeProject.createSourceFile(`/before/${beforeKey}`, c.before)
+      beforeSources.set(beforeKey, before)
+    }
     files.push({
       sf,
       changed: c,
@@ -314,6 +324,7 @@ export async function buildGround(root: string, changed: ChangedFile[], signal?:
     configFiles,
     beforeProject,
     changed,
+    inventory,
     files,
     symbolIndex: buildSymbolIndex(sourceFiles, root, changed, beforeProject),
     deps: depsFor(join(root, 'x.ts')),
@@ -488,14 +499,12 @@ function buildSymbolIndex(
     // the project glob follows symlinked directories, so what it loaded is not
     // proof of where the file is
     if (path.includes('/node_modules/') || !insideRepo(root, path)) continue
-    for (const [name, decls] of sf.getExportedDeclarations()) {
+    for (const { name, node: decl } of exportedDeclarations(sf)) {
       const key = normalizeName(name)
       // Fingerprint only names the change could have introduced. This keeps index
       // construction proportional to the diff even when the project closure is a
       // very large monorepo.
       if (!relevantNames.has(key)) continue
-      const decl = decls[0]
-      if (!decl) continue
       // only index things that could plausibly be reimplemented
       const kind = decl.getKind()
       if (
@@ -503,8 +512,6 @@ function buildSymbolIndex(
         kind !== SyntaxKind.VariableDeclaration
       )
         continue
-      const fingerprint = typescriptImplementationFingerprint(decl)
-      if (!fingerprint) continue
       // A barrel alias can be new in this change even when its underlying callable
       // predates it. Index the declaration from its own module, where both its name
       // and base existence can be proved, rather than manufacturing history for the
@@ -513,11 +520,17 @@ function buildSymbolIndex(
       const declPath = String(decl.getSourceFile().getFilePath())
       if (declPath.includes('/node_modules/') || !insideRepo(root, declPath)) continue
       const rel = repoPath(root, declPath)
+      const fingerprint = typescriptImplementationFingerprint(decl, rel)
+      if (!fingerprint) continue
       const change = changes.get(rel)
-      const before = change?.before === undefined ? undefined : beforeProject.getSourceFile('/before/' + rel)
-      const existedInBase = change === undefined || (before?.getExportedDeclarations().get(name) ?? []).some(
-        (baseDeclaration) => typescriptImplementationFingerprint(baseDeclaration) === fingerprint,
-      )
+      const beforePath = change?.beforePath ?? rel
+      const before = change?.before === undefined ? undefined : beforeProject.getSourceFile('/before/' + beforePath)
+      const sameScope = scopeFor(beforePath) === scopeFor(rel)
+      const existedInBase = change === undefined || (sameScope && before ? exportedDeclarations(before).some(
+        (baseDeclaration) =>
+          baseDeclaration.name === name &&
+          typescriptImplementationFingerprint(baseDeclaration.node, beforePath) === fingerprint,
+      ) : false)
       const list = index.get(key) ?? []
       if (list.some((e) => e.file === rel && e.line === decl.getStartLineNumber())) continue
       list.push({
