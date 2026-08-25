@@ -25,13 +25,42 @@ export type NodeTable = {
   comment: string[]
   /** conditionals whose branch can bail out */
   ifStatement: string[]
-  /** grammar field names for the condition and the branch */
-  ifCondition: string
-  ifBody: string
+  /** grammar field names for the condition, branch, and optional alternative */
+  ifCondition: string[]
+  ifBody: string[]
+  ifAlternative: string[]
   /** statements that leave the enclosing block */
   bail: string[]
   /** things that declare a named callable or type */
   declaration: string[]
+  /** named callables whose control-flow can be compared across a change */
+  callable: string[]
+  /** outer body node removed before fingerprinting a callable's contract */
+  callableBody: string[]
+  /** lexical owners that are part of a callable's identity */
+  callableOwner: string[]
+  /** outer body node removed before fingerprinting an owner's identity */
+  callableOwnerBody: string[]
+  /** file-level package/module declarations that qualify every callable and reusable declaration */
+  fileScope: string[]
+  /** declarations safe for a language-agnostic cross-file reuse comparison */
+  reusableDeclaration: string[]
+  /** transparent syntax containers between the file root and a reusable declaration */
+  reusableContainer: string[]
+  /** transparent containers whose name is a language-level namespace */
+  reusableScope: string[]
+  /** transparent containers whose tokens change the wrapped declaration's meaning */
+  reusableWrapper: string[]
+  /** sibling syntax that semantically prefixes the next reusable declaration */
+  reusablePrefix: string[]
+  /** sibling parse nodes that make the next declaration unsafe to classify */
+  reusableBlocker: string[]
+  /** file or namespace directives that affect name binding for every declaration */
+  bindingContext: string[]
+  /** named module-level bindings pulled in when a declaration references them */
+  bindingDeclaration: string[]
+  /** identifier token types used only when tracing module-level bindings */
+  bindingIdentifier: string[]
   /** grammar field holding a declaration's name */
   declarationName: string
   /** blocks whose children are sibling statements */
@@ -56,6 +85,10 @@ export type LanguagePack = {
   tests?(root: Node): TestFunction[]
   /** documented parameters against the real ones, per callable */
   documentedParams?(root: Node): { fn: string; declared: string[]; documented: { name: string; node: Node }[] }[]
+  /** whether a declaration can actually be reused from another source file */
+  reusableAcrossFiles?(node: Node): boolean
+  /** non-code file constraints such as build tags or module-level cfg attributes */
+  fileConstraints?(root: Node): string[]
 }
 
 export type TestFunction = {
@@ -71,10 +104,29 @@ export type TestFunction = {
 const COMMON_NODES = {
   identifier: ['identifier'],
   comment: ['comment', 'line_comment', 'block_comment'],
-  ifCondition: 'condition',
-  ifBody: 'consequence',
+  ifCondition: ['condition'],
+  ifBody: ['consequence', 'body'],
+  ifAlternative: ['alternative'],
   declarationName: 'name',
   block: ['block'],
+  callableBody: ['block'],
+  callableOwner: [],
+  callableOwnerBody: [],
+  fileScope: [],
+  reusableContainer: [],
+  reusableScope: [],
+  reusableWrapper: [],
+  reusablePrefix: [],
+  reusableBlocker: [],
+  bindingContext: [],
+  bindingDeclaration: [],
+  bindingIdentifier: ['identifier'],
+}
+
+function declarationHeader(node: Node): string {
+  const boundaries = [node.text.indexOf('{')]
+  const end = boundaries.filter((index) => index >= 0).sort((left, right) => left - right)[0]
+  return end === undefined ? node.text : node.text.slice(0, end)
 }
 
 /** Pull the key out of `getenv("HOME")` / `environ["HOME"]` style reads. */
@@ -176,9 +228,16 @@ const PYTHON: LanguagePack = {
   nodes: {
     ...COMMON_NODES,
     ifStatement: ['if_statement'],
-    ifBody: 'consequence',
     bail: ['return_statement', 'raise_statement', 'continue_statement', 'break_statement'],
     declaration: ['function_definition', 'class_definition'],
+    callable: ['function_definition'],
+    callableOwner: ['class_definition', 'decorated_definition'],
+    callableOwnerBody: ['block', 'function_definition', 'class_definition'],
+    reusableDeclaration: ['function_definition', 'class_definition'],
+    reusableContainer: ['decorated_definition'],
+    reusableWrapper: ['decorated_definition'],
+    bindingContext: ['import_statement', 'import_from_statement'],
+    bindingDeclaration: ['expression_statement'],
   },
   envReads(root) {
     return envKeysFrom(root, /os\.environ|getenv/, ['call', 'subscript'])
@@ -322,6 +381,12 @@ const PYTHON: LanguagePack = {
     }
     return out
   },
+  fileConstraints(root) {
+    return root.namedChildren
+      .filter((node) => COMMON_NODES.comment.includes(node.type) && node.startPosition.row <= 1)
+      .map((node) => node.text.trim())
+      .filter((text) => /coding\s*[:=]/.test(text))
+  },
 }
 
 const GO: LanguagePack = {
@@ -333,6 +398,12 @@ const GO: LanguagePack = {
     ifStatement: ['if_statement'],
     bail: ['return_statement', 'continue_statement', 'break_statement', 'goto_statement'],
     declaration: ['function_declaration', 'method_declaration', 'type_declaration'],
+    callable: ['function_declaration', 'method_declaration'],
+    fileScope: ['package_clause'],
+    reusableDeclaration: ['function_declaration', 'type_declaration'],
+    bindingContext: ['import_declaration'],
+    bindingDeclaration: ['const_declaration', 'var_declaration', 'type_declaration'],
+    bindingIdentifier: ['identifier', 'type_identifier'],
   },
   envReads(root) {
     return envKeysFrom(root, /os\.Getenv|os\.LookupEnv/, ['call_expression'])
@@ -353,6 +424,12 @@ const GO: LanguagePack = {
     // the blank identifier is someone saying "I know". An empty `if err != nil` isn't.
     return out
   },
+  fileConstraints(root) {
+    return root.namedChildren
+      .filter((node) => COMMON_NODES.comment.includes(node.type))
+      .map((node) => node.text.trim())
+      .filter((text) => /^\/\/go:build\b|^\/\/\s*\+build\b/.test(text))
+  },
 }
 
 const JAVA: LanguagePack = {
@@ -364,6 +441,17 @@ const JAVA: LanguagePack = {
     ifStatement: ['if_statement'],
     bail: ['return_statement', 'throw_statement', 'continue_statement', 'break_statement'],
     declaration: ['method_declaration', 'class_declaration', 'interface_declaration', 'record_declaration'],
+    callable: ['method_declaration', 'constructor_declaration'],
+    fileScope: ['package_declaration'],
+    callableBody: ['block', 'constructor_body'],
+    callableOwner: [
+      'class_declaration', 'interface_declaration', 'record_declaration',
+      'enum_declaration', 'annotation_type_declaration',
+    ],
+    callableOwnerBody: ['class_body', 'interface_body', 'record_body', 'enum_body', 'annotation_type_body'],
+    reusableDeclaration: ['class_declaration', 'interface_declaration', 'record_declaration'],
+    bindingContext: ['import_declaration'],
+    block: ['block', 'constructor_body'],
   },
   envReads(root) {
     return envKeysFrom(root, /System\.getenv/, ['method_invocation'])
@@ -378,10 +466,16 @@ const RUST: LanguagePack = {
   nodes: {
     ...COMMON_NODES,
     ifStatement: ['if_expression'],
-    ifCondition: 'condition',
-    ifBody: 'consequence',
     bail: ['return_expression', 'break_expression', 'continue_expression'],
     declaration: ['function_item', 'struct_item', 'enum_item', 'trait_item'],
+    callable: ['function_item'],
+    callableOwner: ['impl_item', 'trait_item', 'mod_item'],
+    callableOwnerBody: ['declaration_list'],
+    reusableDeclaration: ['function_item', 'struct_item', 'enum_item', 'trait_item'],
+    reusablePrefix: ['attribute_item'],
+    bindingContext: ['use_declaration', 'extern_crate_declaration'],
+    bindingDeclaration: ['const_item', 'static_item', 'type_item', 'mod_item'],
+    bindingIdentifier: ['identifier', 'type_identifier'],
   },
   envReads(root) {
     return envKeysFrom(root, /env::var|env::var_os/, ['call_expression'])
@@ -402,6 +496,14 @@ const RUST: LanguagePack = {
     }
     return out
   },
+  reusableAcrossFiles(node) {
+    // `pub(self)`, `pub(super)`, and `pub(in ...)` need a module graph to prove
+    // accessibility from another file. Plain `pub` and crate-wide visibility do not.
+    return /\bpub(?:\s*\(\s*crate\s*\))?\s+/.test(declarationHeader(node))
+  },
+  fileConstraints(root) {
+    return nodesOfType(root, ['inner_attribute_item']).map((node) => node.text.trim())
+  },
 }
 
 const CLIKE_LOG = /^(std::(cout|cerr)|printf|fprintf|Console\.|Log|log|logger|error_log|print_r|var_dump)/
@@ -415,11 +517,30 @@ const CPP: LanguagePack = {
     ifStatement: ['if_statement'],
     bail: ['return_statement', 'throw_statement', 'break_statement', 'continue_statement', 'goto_statement'],
     declaration: ['function_definition'],
+    callable: ['function_definition'],
+    callableBody: ['compound_statement'],
+    callableOwner: [
+      'namespace_definition', 'class_specifier', 'struct_specifier', 'union_specifier', 'template_declaration',
+    ],
+    callableOwnerBody: ['declaration_list', 'field_declaration_list', 'function_definition'],
+    reusableDeclaration: ['function_definition'],
+    reusableContainer: ['namespace_definition', 'declaration_list', 'template_declaration'],
+    reusableScope: ['namespace_definition'],
+    reusableWrapper: ['template_declaration'],
+    bindingContext: [
+      'preproc_include', 'preproc_def', 'preproc_function_def',
+      'using_declaration', 'alias_declaration', 'namespace_alias_definition',
+    ],
+    bindingDeclaration: ['declaration', 'type_definition'],
+    bindingIdentifier: ['identifier', 'type_identifier', 'namespace_identifier'],
     declarationName: 'declarator',
     block: ['compound_statement'],
   },
   envReads: (root) => envKeysFrom(root, /getenv|GetEnvironmentVariable/, ['call_expression']),
   swallowedError: catchBased(['catch_clause'], 'body', CLIKE_LOG),
+  reusableAcrossFiles(node) {
+    return !/\bstatic\b/.test(declarationHeader(node))
+  },
 }
 
 const C: LanguagePack = {
@@ -431,10 +552,19 @@ const C: LanguagePack = {
     ifStatement: ['if_statement'],
     bail: ['return_statement', 'break_statement', 'continue_statement', 'goto_statement'],
     declaration: ['function_definition'],
+    callable: ['function_definition'],
+    callableBody: ['compound_statement'],
+    reusableDeclaration: ['function_definition'],
+    bindingContext: ['preproc_include', 'preproc_def', 'preproc_function_def'],
+    bindingDeclaration: ['declaration', 'type_definition'],
+    bindingIdentifier: ['identifier', 'type_identifier'],
     declarationName: 'declarator',
     block: ['compound_statement'],
   },
   envReads: (root) => envKeysFrom(root, /getenv/, ['call_expression']),
+  reusableAcrossFiles(node) {
+    return !/\bstatic\b/.test(declarationHeader(node))
+  },
   // C has no exceptions; its error handling is return codes, which cannot be told
   // from ordinary control flow without types. The other checks still apply.
 }
@@ -448,6 +578,17 @@ const CSHARP: LanguagePack = {
     ifStatement: ['if_statement'],
     bail: ['return_statement', 'throw_statement', 'break_statement', 'continue_statement'],
     declaration: ['method_declaration', 'class_declaration', 'interface_declaration', 'record_declaration'],
+    callable: ['method_declaration', 'constructor_declaration', 'local_function_statement'],
+    callableOwner: [
+      'namespace_declaration', 'file_scoped_namespace_declaration',
+      'class_declaration', 'struct_declaration', 'interface_declaration', 'record_declaration',
+    ],
+    callableOwnerBody: ['declaration_list'],
+    reusableDeclaration: ['class_declaration', 'interface_declaration', 'record_declaration'],
+    reusableContainer: ['namespace_declaration', 'file_scoped_namespace_declaration', 'declaration_list'],
+    reusableScope: ['namespace_declaration', 'file_scoped_namespace_declaration'],
+    reusableBlocker: ['ERROR'],
+    bindingContext: ['using_directive', 'extern_alias_directive'],
     block: ['block', 'declaration_list'],
   },
   envReads: (root) => envKeysFrom(root, /GetEnvironmentVariable/, ['invocation_expression']),
@@ -463,6 +604,18 @@ const PHP: LanguagePack = {
     ifStatement: ['if_statement'],
     bail: ['return_statement', 'throw_expression', 'break_statement', 'continue_statement'],
     declaration: ['function_definition', 'method_declaration', 'class_declaration'],
+    callable: ['function_definition', 'method_declaration'],
+    callableBody: ['compound_statement'],
+    callableOwner: [
+      'namespace_definition', 'class_declaration', 'interface_declaration', 'trait_declaration', 'enum_declaration',
+    ],
+    callableOwnerBody: ['compound_statement', 'declaration_list'],
+    reusableDeclaration: ['function_definition', 'class_declaration'],
+    reusableContainer: ['namespace_definition', 'compound_statement'],
+    reusableScope: ['namespace_definition'],
+    bindingContext: ['namespace_use_declaration', 'expression_statement'],
+    bindingDeclaration: ['const_declaration'],
+    bindingIdentifier: ['name', 'variable_name'],
     block: ['compound_statement'],
   },
   envReads: (root) => envKeysFrom(root, /getenv|\$_ENV/, ['function_call_expression', 'subscript_expression']),
@@ -479,10 +632,23 @@ const KOTLIN: LanguagePack = {
     ifStatement: ['if_expression'],
     bail: ['jump_expression'],
     declaration: ['function_declaration', 'class_declaration', 'object_declaration'],
+    callable: ['function_declaration'],
+    fileScope: ['package_header'],
+    callableBody: ['function_body', 'block', 'statements'],
+    callableOwner: ['class_declaration', 'object_declaration'],
+    callableOwnerBody: ['class_body'],
+    reusableDeclaration: ['function_declaration', 'class_declaration', 'object_declaration'],
+    reusableContainer: ['import_list'],
+    bindingContext: ['import_header'],
+    bindingDeclaration: ['property_declaration', 'type_alias'],
+    bindingIdentifier: ['simple_identifier', 'type_identifier'],
     block: ['statements', 'block'],
   },
   envReads: (root) => envKeysFrom(root, /System\.getenv|getenv/, ['call_expression']),
   swallowedError: catchBased(['catch_block'], undefined, /^(println|print|log|logger|Log)\b/),
+  reusableAcrossFiles(node) {
+    return !/\bprivate\b/.test(declarationHeader(node))
+  },
 }
 
 /*
@@ -508,6 +674,14 @@ const SWIFT_DISABLED: LanguagePack = {
     ifStatement: ['if_statement'],
     bail: ['control_transfer_statement'],
     declaration: ['function_declaration', 'class_declaration', 'protocol_declaration'],
+    callable: ['function_declaration'],
+    callableBody: ['function_body', 'statements'],
+    callableOwner: [
+      'class_declaration', 'struct_declaration', 'protocol_declaration',
+      'extension_declaration', 'enum_declaration',
+    ],
+    callableOwnerBody: ['class_body', 'protocol_body', 'enum_class_body'],
+    reusableDeclaration: ['function_declaration', 'class_declaration', 'protocol_declaration'],
     block: ['statements', 'function_body'],
   },
   envReads: (root) => envKeysFrom(root, /ProcessInfo|environment/, ['call_expression', 'subscript_expression']),
@@ -520,11 +694,17 @@ const RUBY: LanguagePack = {
   grammar: 'tree-sitter-ruby',
   nodes: {
     ...COMMON_NODES,
-    ifStatement: ['if', 'if_modifier'],
-    ifCondition: 'condition',
-    ifBody: 'consequence',
+    ifStatement: ['if', 'if_modifier', 'unless', 'unless_modifier'],
     bail: ['return', 'break', 'next'],
     declaration: ['method', 'singleton_method', 'class', 'module'],
+    callable: ['method', 'singleton_method'],
+    callableBody: ['body_statement'],
+    callableOwner: ['class', 'module'],
+    callableOwnerBody: ['body_statement'],
+    reusableDeclaration: ['method', 'singleton_method', 'class', 'module'],
+    bindingContext: ['call'],
+    bindingDeclaration: ['assignment'],
+    bindingIdentifier: ['identifier', 'constant'],
     block: ['body_statement', 'do_block', 'block'],
   },
   envReads: (root) => envKeysFrom(root, /ENV/, ['element_reference', 'call']),
@@ -556,6 +736,12 @@ const RUBY: LanguagePack = {
     }
     return out
   },
+  fileConstraints(root) {
+    return root.namedChildren
+      .filter((node) => COMMON_NODES.comment.includes(node.type) && node.startPosition.row <= 1)
+      .map((node) => node.text.trim())
+      .filter((text) => /^#\s*(?:frozen_string_literal|encoding|coding)\s*[:=]/.test(text))
+  },
 }
 
 void SWIFT_DISABLED
@@ -570,6 +756,16 @@ const SOLIDITY: LanguagePack = {
     // revert and require are how a contract refuses, alongside plain return
     bail: ['return_statement', 'revert_statement', 'break_statement', 'continue_statement'],
     declaration: ['function_definition', 'contract_declaration', 'modifier_definition'],
+    callable: ['function_definition', 'modifier_definition'],
+    callableBody: ['function_body', 'block_statement'],
+    callableOwner: ['contract_declaration'],
+    callableOwnerBody: ['contract_body'],
+    reusableDeclaration: ['function_definition', 'contract_declaration'],
+    bindingContext: ['import_directive', 'pragma_directive'],
+    bindingDeclaration: [
+      'constant_variable_declaration', 'struct_declaration', 'enum_declaration',
+      'user_defined_value_type_definition',
+    ],
     block: ['block_statement', 'function_body', 'contract_body'],
   },
   swallowedError: catchBased(['catch_clause'], 'body', /^(emit|console\.log)/),

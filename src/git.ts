@@ -75,9 +75,9 @@ function addedLinesInPatch(diff: string): Set<number> {
   return added
 }
 
-function changedPaths(raw: string): { path: string; beforePath?: string }[] {
+function changedPaths(raw: string): { path: string; beforePath?: string; deleted?: boolean }[] {
   const fields = raw.split('\0')
-  const out: { path: string; beforePath?: string }[] = []
+  const out: { path: string; beforePath?: string; deleted?: boolean }[] = []
   for (let i = 0; i < fields.length;) {
     const status = fields[i++]
     if (!status) continue
@@ -88,7 +88,7 @@ function changedPaths(raw: string): { path: string; beforePath?: string }[] {
       continue
     }
     const path = fields[i++]
-    if (path) out.push({ path, beforePath: status === 'A' ? undefined : path })
+    if (path) out.push({ path, beforePath: status === 'A' ? undefined : path, deleted: status === 'D' })
   }
   return out
 }
@@ -191,9 +191,9 @@ export function collectChanges(root: string, range: Range): ChangedFile[] {
 
   const files: ChangedFile[] = []
   const tracked = changedPaths(git(root, [
-    'diff', '--name-status', '-z', '--diff-filter=ACMRT', '--find-renames', ...diffArgs,
+    'diff', '--name-status', '-z', '--diff-filter=ACDMRT', '--find-renames', ...diffArgs,
   ]))
-  for (const { path, beforePath } of tracked) {
+  for (const { path, beforePath, deleted } of tracked) {
     const pathspecs = beforePath && beforePath !== path
       ? [':(literal)' + beforePath, ':(literal)' + path]
       : [':(literal)' + path]
@@ -203,6 +203,8 @@ export function collectChanges(root: string, range: Range): ChangedFile[] {
     ])
     files.push({
       path,
+      beforePath: beforePath && beforePath !== path ? beforePath : undefined,
+      deleted,
       added: addedLinesInPatch(patch),
       before: beforePath === undefined ? undefined : fileAtRef(root, baseRef, beforePath),
     })

@@ -1,7 +1,8 @@
+import { posix } from 'node:path'
 import type { Finding, Ground, Verifier } from '#app/types.js'
 import type { LanguagePack, Node } from '#app/lang/packs.js'
 import { createReinventionScopeResolver, implementationFingerprint } from '#app/reinvention.js'
-import { finding, tokensFor, topLevelDeclarations } from './foreign-tokens.js'
+import { finding, reusableDeclarations } from './foreign-tokens.js'
 
 /** Names too common to mean anything across files, as in the TypeScript version. */
 const GENERIC = new Set([
@@ -27,12 +28,19 @@ function normalized(name: string): string {
 type Declaration = { name: string; node: Node; fingerprint: string }
 type DeclarationIndex = Map<string, Declaration[]>
 
-function declarationIndex(root: Node, pack: LanguagePack): DeclarationIndex {
+function declarationIndex(root: Node, pack: LanguagePack, path: string): DeclarationIndex {
   const index: DeclarationIndex = new Map()
-  for (const [name, node] of topLevelDeclarations(root, pack)) {
-    const key = normalized(name)
+  const sourceScope = pack.name === 'go'
+    ? ['directory:' + posix.dirname(path.replaceAll('\\', '/'))]
+    : []
+  for (const declaration of reusableDeclarations(root, pack, path)) {
+    const { scope, name, node, tokens } = declaration
+    // Declaration names deliberately bridge snake/camel spelling. Language
+    // namespaces do not: changing only their case still names a different scope in
+    // case-sensitive languages.
+    const key = [...sourceScope, ...scope].join('::') + '|' + normalized(name)
     const list = index.get(key) ?? []
-    list.push({ name, node, fingerprint: implementationFingerprint(tokensFor(node, pack)) })
+    list.push({ name, node, fingerprint: implementationFingerprint(tokens) })
     index.set(key, list)
   }
   return index
@@ -53,8 +61,10 @@ export const foreignReinvented: Verifier = {
     const declarations = new Map<string, { current: DeclarationIndex; base?: DeclarationIndex }>()
     for (const file of g.foreign) {
       declarations.set(file.path, {
-        current: declarationIndex(file.tree.rootNode, file.pack),
-        base: file.beforeTree ? declarationIndex(file.beforeTree.rootNode, file.pack) : undefined,
+        current: declarationIndex(file.tree.rootNode, file.pack, file.path),
+        base: file.beforeTree
+          ? declarationIndex(file.beforeTree.rootNode, file.pack, file.changed.beforePath ?? file.path)
+          : undefined,
       })
     }
     for (const file of g.foreign) {
@@ -68,6 +78,8 @@ export const foreignReinvented: Verifier = {
           // The reusable declaration must both predate the change and remain available
           // at the reviewed head. A removed or rewritten helper is not a candidate.
           if (!currentDeclaration) continue
+          const beforePath = file.changed.beforePath ?? file.path
+          if (scopeFor(beforePath) !== scopeFor(file.path)) continue
           const key = file.pack.name + '|' + nameKey
           const list = index.get(key) ?? []
           list.push({
@@ -83,6 +95,7 @@ export const foreignReinvented: Verifier = {
 
     for (const file of g.foreign) {
       if (TESTISH.test(file.path)) continue
+      if (file.changed.beforePath && file.changed.beforePath !== file.path) continue
       const fileDeclarations = declarations.get(file.path)!
       for (const [nameKey, currentDeclarations] of fileDeclarations.current) {
         for (const { name, node: decl, fingerprint } of currentDeclarations) {

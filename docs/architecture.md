@@ -151,6 +151,31 @@ Python dependency grounding follows the same rule. Local modules are discovered 
 direct entries on each changed file's ancestor chain and conventional `src`, `lib`, or
 `python` roots. It never recursively crawls an unrelated monorepo tree.
 
+### Proven findings have one proof shape
+
+A syntax oracle abstains when a refactor falls outside the exact fact it can prove.
+`dropped-guard` pairs stable module bindings, owner, bodyless callable contract, and
+structural block path. It then removes only the candidate guard nodes from the old file
+and requires every remaining compiler-visible token to equal the new file. Any other
+executable change in a supported source file also makes the check abstain, because the
+guard may have moved across that boundary. An import, type, ancestor condition, sibling
+statement, helper extraction, or moved continuation therefore cannot become a
+HIGH/proven defect. The check also abstains when the same token-normalized guard remains
+elsewhere in the callable. The changed-source index is built once from the complete diff
+inventory, including renamed, deleted, and policy-waived paths, so the proof stays linear
+in a large monorepo instead of rescanning the change for every callable.
+
+`reinvented` follows only language-declared module wrappers, includes decorators and
+templates in the token fingerprint, and keeps package and namespace identity separate.
+Its syntax evidence does not claim semantic accessibility: it requires matching declared
+visibility, wrappers, imports, referenced module bindings, conditional compilation, and
+relative binding directory before calling a declaration plausibly reusable.
+Go also requires the same source directory because its import path, not its package
+clause alone, defines cross-file reuse. Anonymous namespaces and file-private
+declarations are excluded. Type bodies, receiver implementations, and nested test
+support are not treated as interchangeable module-level alternatives. Ambiguous
+identities stay available to the optional judge instead of becoming verified facts.
+
 ### Grammar memory is isolated by language
 
 Tree-sitter WASM compilation outlives its JavaScript parser objects. Keeping every
