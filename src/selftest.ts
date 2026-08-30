@@ -1140,7 +1140,7 @@ check('each provider reads its own key', () => {
     if (v === undefined) delete process.env[k]; else process.env[k] = v
   }
 })
-await checkAsync('GLM uses GLM_API_KEY and the official chat-completions contract', async () => {
+await checkAsync('GLM 5.3 Flash leaves output room for a bounded low-effort judge', async () => {
   const originalFetch = globalThis.fetch
   const savedKey = process.env.GLM_API_KEY
   const savedBase = process.env.AI_BASE_URL
@@ -1155,8 +1155,8 @@ await checkAsync('GLM uses GLM_API_KEY and the official chat-completions contrac
     assert.equal(headers.get('content-type'), 'application/json')
     assert.equal(headers.get('accept-language'), 'en-US,en')
     assert.deepEqual(JSON.parse(String(init?.body)), {
-      model: 'glm-5.3',
-      max_tokens: 321,
+      model: 'glm-5.3-flash',
+      max_tokens: 8192,
       temperature: 0,
       stream: false,
       messages: [
@@ -1164,7 +1164,7 @@ await checkAsync('GLM uses GLM_API_KEY and the official chat-completions contrac
         { role: 'user', content: 'review this diff' },
       ],
       thinking: { type: 'enabled' },
-      reasoning_effort: 'max',
+      reasoning_effort: 'low',
     })
     return new Response(JSON.stringify({
       choices: [{ message: { content: '[]' } }],
@@ -1174,7 +1174,7 @@ await checkAsync('GLM uses GLM_API_KEY and the official chat-completions contrac
 
   try {
     const result = await complete({
-      provider: 'glm', model: 'glm-5.3', verifiers: ['*'], judges: ['*'],
+      provider: 'glm', model: 'glm-5.3-flash', verifiers: ['*'], judges: ['*'],
       minSeverity: 'low', ignore: [], coverage: 'portable', promptCache: true,
     }, { system: 'judge carefully', user: 'review this diff' }, 321)
     assert.equal(result.text, '[]')
@@ -1190,19 +1190,24 @@ await checkAsync('GLM rejects an empty assistant response instead of reporting a
   const savedKey = process.env.GLM_API_KEY
   process.env.GLM_API_KEY = 'glm-test-key-12345678'
   globalThis.fetch = async () => new Response(JSON.stringify({
-    choices: [{ message: { content: '   ' } }],
-    usage: { prompt_tokens: 1, completion_tokens: 0 },
+    choices: [{
+      finish_reason: 'length',
+      message: { content: '   ', reasoning_content: 'reasoning-only' },
+    }],
+    usage: { prompt_tokens: 1, completion_tokens: 8192 },
   }), { status: 200, headers: { 'content-type': 'application/json' } })
 
   try {
     await assert.rejects(
       complete({
-        provider: 'glm', model: 'glm-5.3', verifiers: ['*'], judges: ['*'],
+        provider: 'glm', model: 'glm-5.3-flash', verifiers: ['*'], judges: ['*'],
         minSeverity: 'low', ignore: [], coverage: 'portable', promptCache: true,
       }, { system: 'judge carefully', user: 'review this diff' }),
       (error: unknown) => error instanceof ProviderError
         && error.kind === 'bad_response'
-        && error.provider === 'GLM',
+        && error.provider === 'GLM'
+        && error.retryable === false
+        && /finish_reason=length, completion_tokens=8192, reasoning_chars=14/.test(error.message),
     )
   } finally {
     globalThis.fetch = originalFetch
