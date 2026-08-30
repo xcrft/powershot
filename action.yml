@@ -13,8 +13,8 @@ inputs:
   anthropic-api-key:
     description: Anthropic key used when the configured provider is anthropic
     default: ''
-  ai-api-key:
-    description: Z.AI key exposed as AI_API_KEY when the configured provider is glm
+  glm-api-key:
+    description: Z.AI key exposed as GLM_API_KEY when the configured provider is glm
     default: ''
   min-severity:
     description: info | low | medium | high | critical
@@ -87,7 +87,7 @@ runs:
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
-        AI_API_KEY: ${{ inputs.ai-api-key }}
+        GLM_API_KEY: ${{ inputs.glm-api-key }}
         PSH: ${{ github.action_path }}/dist/cli.js
         VERIFY_ONLY: ${{ inputs.verify-only }}
         MIN_SEVERITY: ${{ inputs.min-severity }}

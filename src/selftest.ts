@@ -1128,30 +1128,30 @@ check('each provider reads its own key', () => {
   const base = { model: 'm', verifiers: ['*'], judges: ['*'], minSeverity: 'low' as const,
     ignore: [], coverage: 'portable' as const, promptCache: true }
   const saved = { a: process.env.ANTHROPIC_API_KEY, o: process.env.OPENAI_API_KEY,
-    g: process.env.GEMINI_API_KEY, gg: process.env.GOOGLE_API_KEY, ai: process.env.AI_API_KEY }
+    g: process.env.GEMINI_API_KEY, gg: process.env.GOOGLE_API_KEY, glm: process.env.GLM_API_KEY }
   process.env.ANTHROPIC_API_KEY = 'a'; process.env.OPENAI_API_KEY = 'o'
-  delete process.env.GEMINI_API_KEY; process.env.GOOGLE_API_KEY = 'g'; process.env.AI_API_KEY = 'ai'
+  delete process.env.GEMINI_API_KEY; process.env.GOOGLE_API_KEY = 'g'; process.env.GLM_API_KEY = 'glm'
   assert.equal(apiKey({ ...base, provider: 'anthropic' }), 'a')
   assert.equal(apiKey({ ...base, provider: 'openai' }), 'o')
   assert.equal(apiKey({ ...base, provider: 'gemini' }), 'g') // GOOGLE_API_KEY also works
-  assert.equal(apiKey({ ...base, provider: 'glm' }), 'ai')
+  assert.equal(apiKey({ ...base, provider: 'glm' }), 'glm')
   for (const [k, v] of [['ANTHROPIC_API_KEY', saved.a], ['OPENAI_API_KEY', saved.o],
-    ['GEMINI_API_KEY', saved.g], ['GOOGLE_API_KEY', saved.gg], ['AI_API_KEY', saved.ai]] as const) {
+    ['GEMINI_API_KEY', saved.g], ['GOOGLE_API_KEY', saved.gg], ['GLM_API_KEY', saved.glm]] as const) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v
   }
 })
-await checkAsync('GLM uses AI_API_KEY and the official chat-completions contract', async () => {
+await checkAsync('GLM uses GLM_API_KEY and the official chat-completions contract', async () => {
   const originalFetch = globalThis.fetch
-  const savedKey = process.env.AI_API_KEY
+  const savedKey = process.env.GLM_API_KEY
   const savedBase = process.env.AI_BASE_URL
-  process.env.AI_API_KEY = 'ai-test-key-12345678'
+  process.env.GLM_API_KEY = 'glm-test-key-12345678'
   delete process.env.AI_BASE_URL
 
   globalThis.fetch = async (input, init) => {
     assert.equal(String(input), 'https://api.z.ai/api/paas/v4/chat/completions')
     assert.equal(init?.method, 'POST')
     const headers = new Headers(init?.headers)
-    assert.equal(headers.get('authorization'), 'Bearer ai-test-key-12345678')
+    assert.equal(headers.get('authorization'), 'Bearer glm-test-key-12345678')
     assert.equal(headers.get('content-type'), 'application/json')
     assert.equal(headers.get('accept-language'), 'en-US,en')
     assert.deepEqual(JSON.parse(String(init?.body)), {
@@ -1181,14 +1181,14 @@ await checkAsync('GLM uses AI_API_KEY and the official chat-completions contract
     assert.deepEqual(result.usage, { requests: 1, inputTokens: 17, outputTokens: 3, toolCalls: 0 })
   } finally {
     globalThis.fetch = originalFetch
-    if (savedKey === undefined) delete process.env.AI_API_KEY; else process.env.AI_API_KEY = savedKey
+    if (savedKey === undefined) delete process.env.GLM_API_KEY; else process.env.GLM_API_KEY = savedKey
     if (savedBase === undefined) delete process.env.AI_BASE_URL; else process.env.AI_BASE_URL = savedBase
   }
 })
 await checkAsync('GLM rejects an empty assistant response instead of reporting a clean review', async () => {
   const originalFetch = globalThis.fetch
-  const savedKey = process.env.AI_API_KEY
-  process.env.AI_API_KEY = 'ai-test-key-12345678'
+  const savedKey = process.env.GLM_API_KEY
+  process.env.GLM_API_KEY = 'glm-test-key-12345678'
   globalThis.fetch = async () => new Response(JSON.stringify({
     choices: [{ message: { content: '   ' } }],
     usage: { prompt_tokens: 1, completion_tokens: 0 },
@@ -1206,7 +1206,88 @@ await checkAsync('GLM rejects an empty assistant response instead of reporting a
     )
   } finally {
     globalThis.fetch = originalFetch
-    if (savedKey === undefined) delete process.env.AI_API_KEY; else process.env.AI_API_KEY = savedKey
+    if (savedKey === undefined) delete process.env.GLM_API_KEY; else process.env.GLM_API_KEY = savedKey
+  }
+})
+await checkAsync('GLM billing exhaustion is non-retryable instead of masquerading as a rate limit', async () => {
+  const originalFetch = globalThis.fetch
+  const savedKey = process.env.GLM_API_KEY
+  process.env.GLM_API_KEY = 'glm-test-key-12345678'
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    error: { code: '1113', message: 'Insufficient balance or no resource package. Please recharge.' },
+  }), { status: 429, headers: { 'content-type': 'application/json' } })
+
+  try {
+    await assert.rejects(
+      complete({
+        provider: 'glm', model: 'glm-5.3', verifiers: ['*'], judges: ['*'],
+        minSeverity: 'low', ignore: [], coverage: 'portable', promptCache: true,
+      }, { system: 'judge carefully', user: 'review this diff' }),
+      (error: unknown) => error instanceof ProviderError
+        && error.kind === 'billing'
+        && error.provider === 'GLM'
+        && error.status === 429
+        && error.retryable === false,
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    if (savedKey === undefined) delete process.env.GLM_API_KEY; else process.env.GLM_API_KEY = savedKey
+  }
+})
+await checkAsync('a non-retryable provider failure stops repeated judge calls and accounts for every unit', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-provider-stop-')))
+  const originalFetch = globalThis.fetch
+  const savedKey = process.env.GLM_API_KEY
+  let calls = 0
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true })
+    mkdirSync(join(dir, 'tests'), { recursive: true })
+    writeFileSync(join(dir, 'src', 'first.rs'), 'pub fn first() -> i32 { 1 }\n')
+    writeFileSync(join(dir, 'tests', 'second.rs'), 'pub fn second() -> i32 { 2 }\n')
+    process.env.GLM_API_KEY = 'glm-test-key-12345678'
+    globalThis.fetch = async () => {
+      calls++
+      return new Response(JSON.stringify({
+        error: { code: '1113', message: 'Insufficient balance or no resource package. Please recharge.' },
+      }), { status: 429, headers: { 'content-type': 'application/json' } })
+    }
+
+    const manifest = new RunManifest('provider-stop')
+    const config = { ...loadConfig(dir), provider: 'glm' as const, model: 'glm-5.3' }
+    const result = await review({
+      root: dir,
+      range: {},
+      changes: [
+        { path: 'src/first.rs', added: new Set([1]) },
+        { path: 'tests/second.rs', added: new Set([1]) },
+      ],
+      config,
+      verifyOnly: false,
+      checks: ['plausible-logic'],
+      maxBundleLines: 1,
+      cache: false,
+      manifest,
+    })
+    const record = manifest.build({
+      operation: 'review', target: { requested: {} }, policy: { source: 'default', hash: 'h' },
+      engine: { version: '0', provider: 'glm', model: 'glm-5.3', tools: false, verifyOnly: false },
+      files: result.plan!.items(), skippedChecks: result.skippedChecks ?? [],
+      unavailableChecks: result.unavailableChecks ?? [],
+      findings: { total: result.findings.length, verified: result.stats.verified, judged: result.stats.judged,
+        dismissed: result.stats.dismissed, droppedPosition: result.droppedPosition ?? 0 },
+      usage: result.usage!, failures: result.failures,
+    })
+
+    assert.equal(calls, 1, 'the same non-retryable provider error must not be sent once per unit')
+    assert.equal(result.failures.length, 1)
+    assert.match(result.failures[0]!, /GLM billing: .*further judge calls stopped/)
+    assert.deepEqual(record.units.map((unit) => unit.outcome), ['failed', 'waived'])
+    assert.equal(record.notLookedAt.filter((reason) => reason.includes('GLM billing')).length, 1)
+    assert.deepEqual(coverageProblems(record), [])
+  } finally {
+    globalThis.fetch = originalFetch
+    if (savedKey === undefined) delete process.env.GLM_API_KEY; else process.env.GLM_API_KEY = savedKey
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 
@@ -2189,8 +2270,8 @@ check('self-review publishes machine findings only for a complete verdict', () =
 })
 check('the public action persists judge answers and publishes only a verdict', () => {
   const action = readFileSync(join(process.cwd(), 'action.yml'), 'utf8')
-  assert.match(action, /ai-api-key:\s*\n\s+description: [^\n]+\n\s+default: ''/)
-  assert.match(action, /AI_API_KEY: \$\{\{ inputs\.ai-api-key \}\}/)
+  assert.match(action, /glm-api-key:\s*\n\s+description: [^\n]+\n\s+default: ''/)
+  assert.match(action, /GLM_API_KEY: \$\{\{ inputs\.glm-api-key \}\}/)
   assert.match(action, /uses: actions\/cache@[a-f0-9]{40}/)
   assert.match(action, /POWERSHOT_CACHE_DIR: \$\{\{ runner\.temp \}\}\/powershot-cache/)
   assert.match(action, /restore-keys:/)

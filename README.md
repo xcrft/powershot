@@ -298,16 +298,16 @@ For GLM, select the provider and model in `powershot.config.json`:
 }
 ```
 
-Set `AI_API_KEY` in the surrounding environment. PowerShot uses the Z.AI general API
+Set `GLM_API_KEY` in the surrounding environment. PowerShot uses the Z.AI general API
 by default; set inherited `AI_BASE_URL` only for another compatible regional endpoint
 or proxy. For `glm-5.3`, PowerShot enables thinking with maximum reasoning effort.
-In GitHub Actions, pass the same secret through `ai-api-key`:
+In GitHub Actions, pass the same secret through `glm-api-key`:
 
 ```yaml
 - uses: xcrft/powershot@v1
   with:
     verify-only: 'false'
-    ai-api-key: ${{ secrets.AI_API_KEY }}
+    glm-api-key: ${{ secrets.GLM_API_KEY }}
 ```
 
 If your coding agent already has a model, delegate the judgement instead of paying for

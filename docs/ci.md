@@ -125,7 +125,7 @@ lives at [`examples/github-actions/action.yml`](../examples/github-actions/actio
 |---|---|---|
 | `verify-only` | `true` | Run deterministic checks without a model |
 | `anthropic-api-key` | empty | Supply `ANTHROPIC_API_KEY` when the configured provider is Anthropic |
-| `ai-api-key` | empty | Supply `AI_API_KEY` when the configured provider is GLM |
+| `glm-api-key` | empty | Supply `GLM_API_KEY` when the configured provider is GLM |
 | `min-severity` | `low` | Filter findings below a severity |
 | `checks` | empty | Select comma-separated check ids |
 | `upload-sarif` | `true` | Upload a complete SARIF report to GitHub code scanning |

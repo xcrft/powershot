@@ -13,6 +13,7 @@ export type Msg = { system: string; user: string }
  */
 export type FailureKind =
   | 'auth'
+  | 'billing'
   | 'rate_limit'
   | 'overload'
   | 'timeout'
@@ -48,7 +49,28 @@ export function redact(text: string): string {
     .slice(0, 2000)
 }
 
+function glmBillingFailure(body: string): boolean {
+  try {
+    const json = JSON.parse(body) as { error?: { code?: string | number; message?: string } }
+    if (String(json.error?.code ?? '') === '1113') return true
+    if (/insufficient balance|no resource package|please recharge/i.test(json.error?.message ?? '')) return true
+  } catch {
+    // Some gateways return provider errors as text or HTML. The message remains
+    // enough to distinguish a permanent billing failure from a transient 429.
+  }
+  return /insufficient balance|no resource package|please recharge/i.test(body)
+}
+
 function classify(status: number, body: string, provider: string): ProviderError {
+  if (provider === 'GLM' && glmBillingFailure(body)) {
+    return new ProviderError(
+      'billing',
+      provider,
+      'insufficient balance or no resource package; recharge the Z.AI account or attach a resource package',
+      false,
+      status,
+    )
+  }
   if (status === 401 || status === 403) {
     return new ProviderError('auth', provider, 'rejected the key (' + status + '). ' + body, false, status)
   }
@@ -108,7 +130,7 @@ export async function complete(cfg: Config, msg: Msg, maxTokens = 2000, tools?: 
 export function apiKey(cfg: Config): string | undefined {
   if (cfg.provider === 'openai') return process.env.OPENAI_API_KEY
   if (cfg.provider === 'gemini') return process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY
-  if (cfg.provider === 'glm') return process.env.AI_API_KEY
+  if (cfg.provider === 'glm') return process.env.GLM_API_KEY
   return process.env.ANTHROPIC_API_KEY
 }
 
@@ -229,8 +251,8 @@ async function openai(cfg: Config, msg: Msg, maxTokens: number): Promise<Complet
  * send one vendor's key to another vendor's host.
  */
 async function glm(cfg: Config, msg: Msg, maxTokens: number): Promise<Completion> {
-  const key = process.env.AI_API_KEY
-  if (!key) throw new ProviderError('configuration', 'GLM', 'AI_API_KEY is not set')
+  const key = process.env.GLM_API_KEY
+  if (!key) throw new ProviderError('configuration', 'GLM', 'GLM_API_KEY is not set')
   const body: Record<string, unknown> = {
     model: cfg.model,
     max_tokens: maxTokens,
