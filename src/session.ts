@@ -46,6 +46,7 @@ type Stored = {
     verifyOnly?: ReviewSummary['verifyOnly']
     minSeverity?: ReviewSummary['minSeverity']
     filesReviewed?: number
+    filesChanged?: number
     deterministicChecks?: number
     scopeDetails?: string[]
   }
@@ -144,6 +145,7 @@ export class Session {
       verifyOnly: verdict.verifyOnly,
       minSeverity: verdict.minSeverity,
       filesReviewed: verdict.filesReviewed,
+      filesChanged: verdict.filesChanged,
       deterministicChecks: verdict.deterministicChecks,
       scopeDetails: verdict.scopeDetails ? [...verdict.scopeDetails] : undefined,
     }

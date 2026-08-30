@@ -49,6 +49,7 @@ export function runSessionCommand(positionals: string[]): number {
       verifyOnly: session.report.verifyOnly,
       minSeverity: session.report.minSeverity,
       filesReviewed: session.report.filesReviewed,
+      filesChanged: session.report.filesChanged,
       deterministicChecks: session.report.deterministicChecks,
       scopeDetails: session.report.scopeDetails,
     }))
