@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { Project } from 'ts-morph'
 import type { ChangedFile, Finding, Ground, Verifier } from './types.js'
 import { phantomApi, phantomDep, reinvented, droppedGuard, swallowedError, vacuousTest, assertionDrift, scopeCreep, contractDrift, copyPasteDrift, deadOnArrival, lyingComment } from './verifiers/index.js'
-import { extractJsonArray, endpoint } from './judges/llm.js'
+import { complete, extractJsonArray, endpoint, ProviderError, redact } from './judges/llm.js'
 import { matchesAny, validateConfig } from './config.js'
 import { titleOverlap } from './review.js'
 import { caretFor, validateSuggestion } from './position.js'
@@ -28,7 +28,6 @@ import { insideRepo, repoPath } from './fspolicy.js'
 import { Budget, parseLimits } from './budget.js'
 import { SelectionPlan, capabilitiesOf } from './plan.js'
 import { RunManifest, SCHEMA, coverageProblems } from './manifest.js'
-import { ProviderError, redact } from './judges/llm.js'
 import { VERIFIERS } from './verifiers/index.js'
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, symlinkSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -1129,15 +1128,85 @@ check('each provider reads its own key', () => {
   const base = { model: 'm', verifiers: ['*'], judges: ['*'], minSeverity: 'low' as const,
     ignore: [], coverage: 'portable' as const, promptCache: true }
   const saved = { a: process.env.ANTHROPIC_API_KEY, o: process.env.OPENAI_API_KEY,
-    g: process.env.GEMINI_API_KEY, gg: process.env.GOOGLE_API_KEY }
+    g: process.env.GEMINI_API_KEY, gg: process.env.GOOGLE_API_KEY, ai: process.env.AI_API_KEY }
   process.env.ANTHROPIC_API_KEY = 'a'; process.env.OPENAI_API_KEY = 'o'
-  delete process.env.GEMINI_API_KEY; process.env.GOOGLE_API_KEY = 'g'
+  delete process.env.GEMINI_API_KEY; process.env.GOOGLE_API_KEY = 'g'; process.env.AI_API_KEY = 'ai'
   assert.equal(apiKey({ ...base, provider: 'anthropic' }), 'a')
   assert.equal(apiKey({ ...base, provider: 'openai' }), 'o')
   assert.equal(apiKey({ ...base, provider: 'gemini' }), 'g') // GOOGLE_API_KEY also works
+  assert.equal(apiKey({ ...base, provider: 'glm' }), 'ai')
   for (const [k, v] of [['ANTHROPIC_API_KEY', saved.a], ['OPENAI_API_KEY', saved.o],
-    ['GEMINI_API_KEY', saved.g], ['GOOGLE_API_KEY', saved.gg]] as const) {
+    ['GEMINI_API_KEY', saved.g], ['GOOGLE_API_KEY', saved.gg], ['AI_API_KEY', saved.ai]] as const) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v
+  }
+})
+await checkAsync('GLM uses AI_API_KEY and the official chat-completions contract', async () => {
+  const originalFetch = globalThis.fetch
+  const savedKey = process.env.AI_API_KEY
+  const savedBase = process.env.AI_BASE_URL
+  process.env.AI_API_KEY = 'ai-test-key-12345678'
+  delete process.env.AI_BASE_URL
+
+  globalThis.fetch = async (input, init) => {
+    assert.equal(String(input), 'https://api.z.ai/api/paas/v4/chat/completions')
+    assert.equal(init?.method, 'POST')
+    const headers = new Headers(init?.headers)
+    assert.equal(headers.get('authorization'), 'Bearer ai-test-key-12345678')
+    assert.equal(headers.get('content-type'), 'application/json')
+    assert.equal(headers.get('accept-language'), 'en-US,en')
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      model: 'glm-5.3',
+      max_tokens: 321,
+      temperature: 0,
+      stream: false,
+      messages: [
+        { role: 'system', content: 'judge carefully' },
+        { role: 'user', content: 'review this diff' },
+      ],
+      thinking: { type: 'enabled' },
+      reasoning_effort: 'max',
+    })
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: '[]' } }],
+      usage: { prompt_tokens: 17, completion_tokens: 3 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+
+  try {
+    const result = await complete({
+      provider: 'glm', model: 'glm-5.3', verifiers: ['*'], judges: ['*'],
+      minSeverity: 'low', ignore: [], coverage: 'portable', promptCache: true,
+    }, { system: 'judge carefully', user: 'review this diff' }, 321)
+    assert.equal(result.text, '[]')
+    assert.deepEqual(result.usage, { requests: 1, inputTokens: 17, outputTokens: 3, toolCalls: 0 })
+  } finally {
+    globalThis.fetch = originalFetch
+    if (savedKey === undefined) delete process.env.AI_API_KEY; else process.env.AI_API_KEY = savedKey
+    if (savedBase === undefined) delete process.env.AI_BASE_URL; else process.env.AI_BASE_URL = savedBase
+  }
+})
+await checkAsync('GLM rejects an empty assistant response instead of reporting a clean review', async () => {
+  const originalFetch = globalThis.fetch
+  const savedKey = process.env.AI_API_KEY
+  process.env.AI_API_KEY = 'ai-test-key-12345678'
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ message: { content: '   ' } }],
+    usage: { prompt_tokens: 1, completion_tokens: 0 },
+  }), { status: 200, headers: { 'content-type': 'application/json' } })
+
+  try {
+    await assert.rejects(
+      complete({
+        provider: 'glm', model: 'glm-5.3', verifiers: ['*'], judges: ['*'],
+        minSeverity: 'low', ignore: [], coverage: 'portable', promptCache: true,
+      }, { system: 'judge carefully', user: 'review this diff' }),
+      (error: unknown) => error instanceof ProviderError
+        && error.kind === 'bad_response'
+        && error.provider === 'GLM',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    if (savedKey === undefined) delete process.env.AI_API_KEY; else process.env.AI_API_KEY = savedKey
   }
 })
 
@@ -2120,6 +2189,8 @@ check('self-review publishes machine findings only for a complete verdict', () =
 })
 check('the public action persists judge answers and publishes only a verdict', () => {
   const action = readFileSync(join(process.cwd(), 'action.yml'), 'utf8')
+  assert.match(action, /ai-api-key:\s*\n\s+description: [^\n]+\n\s+default: ''/)
+  assert.match(action, /AI_API_KEY: \$\{\{ inputs\.ai-api-key \}\}/)
   assert.match(action, /uses: actions\/cache@[a-f0-9]{40}/)
   assert.match(action, /POWERSHOT_CACHE_DIR: \$\{\{ runner\.temp \}\}\/powershot-cache/)
   assert.match(action, /restore-keys:/)
@@ -3056,6 +3127,7 @@ check('an unknown setting, provider or severity is reported with what was meant'
   assert.match(validateConfig({ provider: 'antropic' }, KNOWN)[0]!, /not one of: anthropic/)
   assert.match(validateConfig({ minSeverity: 'huge' }, KNOWN)[0]!, /not one of: info/)
   assert.deepEqual(validateConfig({ provider: 'openai', minSeverity: 'high' }, KNOWN), [])
+  assert.deepEqual(validateConfig({ provider: 'glm', minSeverity: 'high' }, KNOWN), [])
 })
 check('judges accept both the plain list and the { enable } form', () => {
   assert.deepEqual(validateConfig({ judges: { enable: ['security'] } }, KNOWN), [])

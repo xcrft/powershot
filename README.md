@@ -264,7 +264,7 @@ Copy-paste examples:
 ## Optional model judges
 
 Judges cover plausible logic, test adequacy, change intent, and repository conventions.
-Anthropic, OpenAI, and Gemini providers are supported.
+Anthropic, OpenAI, Gemini, and GLM providers are supported.
 
 ```json
 {
@@ -287,6 +287,27 @@ environment, and omit `--verify-only`:
 ```bash
 export ANTHROPIC_API_KEY=...
 psh review --from main --to HEAD
+```
+
+For GLM, select the provider and model in `powershot.config.json`:
+
+```json
+{
+  "provider": "glm",
+  "model": "glm-5.3"
+}
+```
+
+Set `AI_API_KEY` in the surrounding environment. PowerShot uses the Z.AI general API
+by default; set inherited `AI_BASE_URL` only for another compatible regional endpoint
+or proxy. For `glm-5.3`, PowerShot enables thinking with maximum reasoning effort.
+In GitHub Actions, pass the same secret through `ai-api-key`:
+
+```yaml
+- uses: xcrft/powershot@v1
+  with:
+    verify-only: 'false'
+    ai-api-key: ${{ secrets.AI_API_KEY }}
 ```
 
 If your coding agent already has a model, delegate the judgement instead of paying for
