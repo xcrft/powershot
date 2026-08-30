@@ -50,8 +50,37 @@ function headMarker(headSha: string): string {
   return `<!-- powershot:head:${headSha.toLowerCase()} -->`
 }
 
+/** Turn report-relative source links into links fixed to the reviewed PR head. */
+function pinSourceLinks(markdown: string, headSha: string): string {
+  let fence: { character: string; length: number } | undefined
+  return markdown.split('\n').map((line) => {
+    const delimiter = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence !== undefined) {
+      const closing = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line)?.[1]
+      if (
+        closing?.[0] === fence.character &&
+        closing.length >= fence.length
+      ) {
+        fence = undefined
+      }
+      return line
+    }
+    if (delimiter !== undefined) {
+      fence = { character: delimiter[0]!, length: delimiter.length }
+      return line
+    }
+    return line.replace(
+      /\]\(\.\/([^\s)]+#L\d+)\)/g,
+      `](../blob/${headSha.toLowerCase()}/$1)`,
+    )
+  }).join('\n')
+}
+
 export function summaryCommentBody(markdown: string, marker: string, headSha: string): string {
-  const report = markdown.trimEnd()
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(headSha)) {
+    throw new Error('PowerShot summary head is invalid')
+  }
+  const report = pinSourceLinks(markdown, headSha).trimEnd()
   const ownership = `${marker}\n${headMarker(headSha)}`
   return report.length === 0 ? ownership : `${ownership}\n\n${report}`
 }

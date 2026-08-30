@@ -1,5 +1,6 @@
 import { PACKAGE_HOMEPAGE } from '#app/package-meta.js'
 import type { Finding, Severity } from '#app/types.js'
+import { publishableFindings } from './publication.js'
 
 /** SARIF has three levels; map ours onto them without inventing precision. */
 function level(severity: Severity): 'error' | 'warning' | 'note' {
@@ -24,6 +25,7 @@ const DESCRIPTIONS: Record<string, string> = {
  * inline PR annotations. Only the fields consumers actually read are emitted.
  */
 export function sarif(findings: Finding[]): string {
+  findings = publishableFindings(findings)
   const checks = [...new Set(findings.map((f) => f.check))].sort()
 
   const doc = {

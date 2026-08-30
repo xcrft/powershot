@@ -81,6 +81,52 @@ export function titleOverlap(a: string, b: string): number {
   return shared / Math.min(left.size, right.size)
 }
 
+const TITLE_STOP_WORDS = new Set([
+  'the', 'and', 'are', 'for', 'from', 'into', 'that', 'this', 'with',
+])
+const CAUSAL_DUPLICATE_WINDOW_LINES = 32
+
+/** Collapse light English inflection without binding deduplication to one domain. */
+function titleTerms(title: string): Set<string> {
+  const normalize = (word: string): string => {
+    if (word.endsWith('ies') && word.length > 4) return word.slice(0, -3) + 'y'
+    if (word.endsWith('ing') && word.length > 5) {
+      const stem = word.slice(0, -3)
+      return stem.at(-1) === stem.at(-2) ? stem.slice(0, -1) : stem
+    }
+    if (word.endsWith('ed') && word.length > 4) {
+      const withoutD = word.slice(0, -1)
+      return withoutD.endsWith('e') ? withoutD : word.slice(0, -2)
+    }
+    if (word.endsWith('s') && !word.endsWith('ss') && word.length > 4) return word.slice(0, -1)
+    return word
+  }
+
+  return new Set(
+    (title.toLowerCase().match(/[a-z0-9_]{3,}/g) ?? [])
+      .filter((word) => !TITLE_STOP_WORDS.has(word))
+      .map(normalize),
+  )
+}
+
+function sameDefect(left: Finding, right: Finding): boolean {
+  if (left.file !== right.file) return false
+  const distance = Math.abs(left.line - right.line)
+  if (distance <= 2 && titleOverlap(left.title, right.title) >= 0.7) return true
+  // The broader window is only for corroborating model passes. Deterministic
+  // diagnostics at different locations remain independent even when their titles
+  // share repository vocabulary.
+  if (left.class !== 'judged' || right.class !== 'judged') return false
+  if (distance > CAUSAL_DUPLICATE_WINDOW_LINES) return false
+
+  const leftTerms = titleTerms(left.title)
+  const rightTerms = titleTerms(right.title)
+  if (leftTerms.size === 0 || rightTerms.size === 0) return false
+  let shared = 0
+  for (const term of leftTerms) if (rightTerms.has(term)) shared++
+  return shared >= 4 && shared / Math.min(leftTerms.size, rightTerms.size) >= 0.55
+}
+
 type NativeFile = Ground['files'][number]
 type VerifierTarget =
   | { kind: 'typescript'; path: string; file: NativeFile; missing: Capability[] }
@@ -148,16 +194,29 @@ function groundFor(g: Ground, targets: VerifierTarget[]): Ground {
 
 function dropNearDuplicates(findings: Finding[]): Finding[] {
   const kept: Finding[] = []
-  for (const f of findings) {
-    const duplicate = kept.some(
-      (k) => k.file === f.file && Math.abs(k.line - f.line) <= 2 && titleOverlap(k.title, f.title) >= 0.7,
-    )
-    if (!duplicate) kept.push(f)
+  const visited = new Set<number>()
+  for (let index = 0; index < findings.length; index++) {
+    if (visited.has(index)) continue
+    kept.push(findings[index]!)
+    visited.add(index)
+
+    // Similarity is not transitive by itself: one judge can describe the cause,
+    // another the state transition, and a third the symptom. Walk the connected
+    // component so the middle wording can join all three into one defect.
+    const pending = [index]
+    while (pending.length > 0) {
+      const current = pending.pop()!
+      for (let candidate = 0; candidate < findings.length; candidate++) {
+        if (visited.has(candidate) || !sameDefect(findings[current]!, findings[candidate]!)) continue
+        visited.add(candidate)
+        pending.push(candidate)
+      }
+    }
   }
   return kept
 }
 
-function finalize(findings: Finding[]): Finding[] {
+export function finalizeFindings(findings: Finding[]): Finding[] {
   // the compiler reports one mistake through several diagnostics
   const seen = new Set<string>()
   findings = findings.filter((f) => {
@@ -167,10 +226,14 @@ function finalize(findings: Finding[]): Finding[] {
     return true
   })
 
-  // Sorted before folding: folding keeps whichever copy comes first, so the other
-  // way round a `low` duplicate would evict the `critical` saying the same thing.
+  // Sorted before folding: folding keeps whichever copy comes first. Confidence
+  // outranks severity so a speculative high-severity paraphrase cannot evict the
+  // firm version of the same defect.
   const sorted = findings.slice().sort((a, b) => {
     if (a.class !== b.class) return a.class === 'verified' ? -1 : 1
+    const confidence = ['tentative', 'firm', 'proven'].indexOf(b.confidence) -
+      ['tentative', 'firm', 'proven'].indexOf(a.confidence)
+    if (confidence !== 0) return confidence
     const sev = SEVERITIES.indexOf(b.severity) - SEVERITIES.indexOf(a.severity)
     if (sev !== 0) return sev
     return a.file.localeCompare(b.file) || a.line - b.line
@@ -434,7 +497,7 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
   const pending = base ? Dismissals.pendingIn(repo, base) : 0
   if (pending > 0) say('dismissed ' + pending + ' new dismissal(s) in this change — not applied to it')
 
-  const kept = finalize(surviving)
+  const kept = finalizeFindings(surviving)
   rememberReport(repo, kept) // so `psh dismiss F2` knows which finding F2 was
   // stats describe what is reported, not what was found before filtering
   return {

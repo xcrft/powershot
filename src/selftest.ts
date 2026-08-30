@@ -9,7 +9,7 @@ import type { ChangedFile, Finding, Ground, Verifier } from './types.js'
 import { phantomApi, phantomDep, reinvented, droppedGuard, swallowedError, vacuousTest, assertionDrift, scopeCreep, contractDrift, copyPasteDrift, deadOnArrival, lyingComment } from './verifiers/index.js'
 import { complete, extractJsonArray, endpoint, ProviderError, redact } from './judges/llm.js'
 import { matchesAny, validateConfig } from './config.js'
-import { titleOverlap } from './review.js'
+import { finalizeFindings, titleOverlap } from './review.js'
 import { caretFor, validateSuggestion } from './position.js'
 import { parseFindings } from './judges/judge.js'
 import { JUDGES, COMMON } from './judges/prompts.js'
@@ -1613,6 +1613,24 @@ const ownedSummaryMarker = summaryMarker(summaryScope)
 const renderedSummary = (markdown: string): string =>
   summaryCommentBody(markdown, ownedSummaryMarker, summaryHead)
 
+check('summary comments pin report links to the reviewed head without rewriting code', () => {
+  const report = [
+    '▚ **MEDIUM** · `intent` · firm — [src/a.ts:7](./src/a.ts#L7)',
+    '',
+    '```markdown',
+    '[fixture](./src/fixture.ts#L1)',
+    '```',
+  ].join('\n')
+  const body = renderedSummary(report)
+  assert.match(body, new RegExp(`\\]\\(\\.\\.\\/blob\\/${summaryHead}\\/src\\/a\\.ts#L7\\)`))
+  const sourceHref = /\[src\/a\.ts:7\]\(([^)]+)\)/.exec(body)?.[1]
+  assert.equal(
+    new URL(sourceHref!, 'https://github.com/xcrft/powershot/pull/17').href,
+    `https://github.com/xcrft/powershot/blob/${summaryHead}/src/a.ts#L7`,
+  )
+  assert.match(body, /\[fixture\]\(\.\/src\/fixture\.ts#L1\)/)
+})
+
 check('summary scope follows the workflow file and job, not its moving ref', () => {
   assert.equal(
     workflowCommentScope(
@@ -2293,11 +2311,11 @@ check('the public action persists judge answers and publishes only a verdict', (
   assert.match(action, /--report manifest=powershot\.manifest\.json/)
   assert.match(action, /coverage=\$COVERAGE/)
   assert.match(action, /m\.coverage === "full" \|\| m\.coverage === "portable" \? m\.coverage : "unknown"/)
-  assert.match(action, /Approve a clean review[\s\S]+steps\.review\.outputs\.coverage == 'full'/)
+  assert.match(action, /Approve an actionable-clean review[\s\S]+steps\.review\.outputs\.coverage == 'full'/)
 })
 check('the public action keeps every pull request write inside the base repository', () => {
   const action = readFileSync(join(process.cwd(), 'action.yml'), 'utf8')
-  for (const name of ['Post inline comments', 'Comment on the pull request', 'Approve a clean review']) {
+  for (const name of ['Post inline comments', 'Comment on the pull request', 'Approve an actionable-clean review']) {
     const start = action.indexOf('    - name: ' + name)
     const end = action.indexOf('\n    - name: ', start + 1)
     const step = action.slice(start, end === -1 ? undefined : end)
@@ -2327,9 +2345,9 @@ check('published CI examples preserve one verdict and its exit status', () => {
 check('code quality fingerprints are stable across runs', () => {
   const a = JSON.parse(codeQuality(sample))
   const b = JSON.parse(codeQuality(sample))
+  assert.equal(a.length, 1) // tentative agent suspicions are not MR annotations
   assert.equal(a[0].fingerprint, b[0].fingerprint) // else GitLab calls every finding new
   assert.equal(a[0].severity, 'major')
-  assert.equal(a[1].severity, 'info')
   assert.equal(a[0].location.lines.begin, 3)
 })
 check('the viewer is one self-contained page', () => {
@@ -3055,12 +3073,89 @@ check('one defect reported twice in different words is one finding', () => {
                          'Missing await on the async call') < 0.7)
   assert.equal(titleOverlap('', 'anything'), 0)
 })
+check('one agent defect is consolidated across checks and nearby causal lines', () => {
+  const duplicates: Finding[] = [
+    {
+      id: 'raw-1', class: 'judged', check: 'intent', severity: 'medium', confidence: 'firm',
+      file: 'research/classifier_train/src/trainer.py', line: 183,
+      title: "Evaluation activations are averaged into the next training step's penalty",
+    },
+    {
+      id: 'raw-2', class: 'judged', check: 'plausible-logic', severity: 'medium', confidence: 'tentative',
+      file: 'research/classifier_train/src/trainer.py', line: 205,
+      title: 'Draining eval-time penalties still mixes validation activations into the next training loss',
+    },
+    {
+      id: 'raw-3', class: 'judged', check: 'test-adequacy', severity: 'medium', confidence: 'firm',
+      file: 'research/classifier_train/src/trainer.py', line: 205,
+      title: 'Draining at the next training step does not prevent validation activations entering the penalty',
+    },
+  ]
+
+  const consolidated = finalizeFindings(duplicates)
+  assert.equal(consolidated.length, 1)
+  assert.equal(consolidated[0]?.check, 'intent')
+  assert.equal(consolidated[0]?.confidence, 'firm')
+
+  const distinct = finalizeFindings([
+    duplicates[0]!,
+    {
+      id: 'other', class: 'judged', check: 'test-adequacy', severity: 'medium', confidence: 'firm',
+      file: duplicates[0]!.file, line: 201,
+      title: 'Checkpoint restore leaves optimizer state stale',
+    },
+  ])
+  assert.equal(distinct.length, 2)
+
+  const chained = finalizeFindings([
+    { ...duplicates[0]!, line: 10, title: 'Cache request token expires before reuse' },
+    { ...duplicates[1]!, line: 20, title: 'Cache request token reuse ignores stale state' },
+    { ...duplicates[2]!, line: 30, title: 'Stale cache state reuse returns outdated response' },
+  ])
+  assert.equal(chained.length, 1, 'a bridging paraphrase should join one causal cluster')
+})
+check('published reports withhold tentative agent suspicions and label fixes as prose', () => {
+  const firm: Finding = {
+    id: 'F1', class: 'judged', check: 'intent', severity: 'medium', confidence: 'firm',
+    file: 'src/trainer.py', line: 18, title: 'Evaluation state leaks into training',
+    evidence: { oracle: 'agent', detail: 'The evaluation hook remains active.' },
+    fix: 'Clear the accumulator after evaluation.',
+  }
+  const tentative: Finding = {
+    id: 'F2', class: 'judged', check: 'plausible-logic', severity: 'medium', confidence: 'tentative',
+    file: 'src/hook.py', line: 7, title: 'Hook might use the wrong arity',
+  }
+
+  const rendered = markdown([firm, tentative])
+  assert.match(rendered, /\*\*0 deterministic findings\*\* · \*\*1 actionable agent finding\*\*/)
+  assert.match(rendered, /1 tentative agent suspicion withheld from this summary/)
+  assert.doesNotMatch(rendered, /Hook might use the wrong arity/)
+  assert.match(rendered, /> \*\*Why:\*\* The evaluation hook remains active\\\./)
+  assert.match(rendered, /> \*\*Fix:\*\* Clear the accumulator after evaluation\\\./)
+  assert.doesNotMatch(rendered, /```\nClear the accumulator/)
+
+  const machine = JSON.parse(sarif([firm, tentative]))
+  assert.deepEqual(machine.runs[0].results.map((result: { message: { text: string } }) => result.message.text), [
+    'Evaluation state leaks into training (agent: The evaluation hook remains active.)',
+  ])
+  assert.deepEqual(JSON.parse(codeQuality([firm, tentative])).map((result: { description: string }) => result.description), [
+    'Evaluation state leaks into training',
+  ])
+
+  const verbose = markdown([{
+    ...firm,
+    evidence: { oracle: 'agent', detail: 'reason '.repeat(120) + 'evidence-tail' },
+    fix: 'change '.repeat(100) + 'fix-tail',
+  }])
+  assert.equal((verbose.match(/…/g) ?? []).length, 2)
+  assert.doesNotMatch(verbose, /evidence-tail|fix-tail/)
+})
 check('sarif output has the shape GitHub code scanning ingests', () => {
   const doc = JSON.parse(
     sarif([
       { id: 'F1', class: 'verified', check: 'phantom-dep', severity: 'high', confidence: 'proven',
         file: 'src/a.ts', line: 3, title: 'missing dep' },
-      { id: 'F2', class: 'judged', check: 'plausible-logic', severity: 'low', confidence: 'tentative',
+      { id: 'F2', class: 'judged', check: 'plausible-logic', severity: 'low', confidence: 'firm',
         file: 'src/b.ts', line: 9, title: 'off by one' },
     ]),
   )
@@ -3363,7 +3458,7 @@ function markdownBlockEscape(out: string): string | undefined {
     }
     if (
       /^(?:#{1,6}\s|>\s|[-+*]\s|\d+[.)]\s|(?:[-*_]\s*){3,})/.test(line) &&
-      !/^## PowerShot$|^### `|^> _.*_: /.test(line)
+      !/^## PowerShot$|^### `|^> (?:_.*_: |\*\*(?:Why(?: .*?)?|Fix):\*\* )/.test(line)
     ) {
       return line
     }

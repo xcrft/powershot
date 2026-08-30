@@ -109,6 +109,11 @@ Every finding says where it came from:
 | `verified` | `firm` | A deterministic heuristic fired; inspect the evidence |
 | `judged` | `firm` or `tentative` | A model supplied the judgement and provenance |
 
+Publication formats make that calibration enforceable: Markdown, SARIF, and GitLab
+Code Quality include `firm` agent findings and withhold `tentative` suspicions.
+The JSON report, terminal, viewer, session, and judge cache retain tentative output
+for inspection without presenting it as an actionable review finding.
+
 Portable coverage is the default: self-contained oracles run without bootstrapping the
 reviewed repository, while unavailable compiler/reference depth stays visible in the
 manifest and reports. Set `"coverage": "strict"`, or explicitly select a check with
@@ -249,8 +254,9 @@ protected required workflow when immutable dependencies are required.
 `medium` severity or higher as one GitHub review, and only when GitHub confirms the
 finding line was added by the pull request. Reruns keep matching bot comments and
 retire stale PowerShot copies that have no replies. Human comments and discussions
-are preserved. Every finding still stays in the full report and, when `comment` is
-enabled, the summary comment.
+are preserved. The JSON report retains every finding. The summary publishes
+deterministic and `firm` agent findings and reports how many `tentative` agent
+suspicions it withheld.
 
 The [CI guide](docs/ci.md) covers exit handling, Git history, one-run/many-report
 artifacts, GitLab Code Quality, local parity, and recommended gate policies.
