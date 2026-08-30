@@ -23,17 +23,17 @@ inputs:
     description: Upload the SARIF report to GitHub code scanning
     default: 'true'
   comment:
-    description: Post the review as a pull request comment
+    description: Post the review as a comment on same-repository pull requests
     default: 'true'
   inline-comments:
-    description: Post up to 10 proven verified findings on changed pull request lines
+    description: Post up to 10 proven verified findings on same-repository pull requests
     default: 'false'
   fail-on-findings:
     description: Fail the job when anything is reported
     default: 'false'
   approve:
     description: >
-      Approve the pull request only when the review is clean and coverage is full.
+      Approve a same-repository pull request only when the review is clean and coverage is full.
       Off by default on purpose: an approval is a human signal, and a tool that
       grants one silently is a tool that can wave through optional semantic depth.
     default: 'false'
@@ -154,7 +154,9 @@ runs:
         category: powershot
 
     - name: Post inline comments
-      if: always() && inputs.inline-comments == 'true' && github.event_name == 'pull_request' && steps.review.outputs.complete == 'true' && hashFiles('powershot.json') != ''
+      # Fork pull_request tokens are read-only. The complete report remains in the
+      # job summary, while every operation that writes to the PR stays same-repo.
+      if: always() && inputs.inline-comments == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.complete == 'true' && hashFiles('powershot.json') != ''
       shell: bash
       env:
         GITHUB_TOKEN: ${{ github.token }}
@@ -165,7 +167,7 @@ runs:
 
     - name: Comment on the pull request
       # always, so an incomplete review is still explained — the body says so itself
-      if: always() && inputs.comment == 'true' && github.event_name == 'pull_request' && hashFiles('powershot.md') != ''
+      if: always() && inputs.comment == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('powershot.md') != ''
       shell: bash
       env:
         GITHUB_TOKEN: ${{ github.token }}
@@ -179,7 +181,7 @@ runs:
     - name: Approve a clean review
       # only on a completed, genuinely empty review — an incomplete run must never
       # approve, since "we found nothing" and "we could not look" are different
-      if: inputs.approve == 'true' && github.event_name == 'pull_request' && steps.review.outputs.findings == '0' && steps.review.outputs.complete == 'true' && steps.review.outputs.coverage == 'full'
+      if: inputs.approve == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.review.outputs.findings == '0' && steps.review.outputs.complete == 'true' && steps.review.outputs.coverage == 'full'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}

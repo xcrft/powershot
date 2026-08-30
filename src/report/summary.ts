@@ -11,6 +11,7 @@ export type ReviewSummary<State extends ReviewState = ReviewState> = {
   verifyOnly?: boolean
   minSeverity?: Severity
   filesReviewed?: number
+  filesChanged?: number
   deterministicChecks?: number
   scopeDetails?: string[]
 }
@@ -109,6 +110,7 @@ export function summarizeRun<State extends ReviewState>(record: SummaryRecord<St
     filesReviewed: hasFiles
       ? record.files!.filter((file) => file.disposition === 'selected').length
       : undefined,
+    filesChanged: hasFiles ? record.files!.length : undefined,
     deterministicChecks: hasChecks ? new Set(record.checks!.ran).size : undefined,
     scopeDetails: scopeDetails(record),
   }
@@ -126,11 +128,20 @@ export function noFindingsLabel(summary: ReviewSummary): string {
 
 export function scopeLine(summary: ReviewSummary): string | undefined {
   const parts: string[] = []
-  if (summary.filesReviewed !== undefined) parts.push(plural(summary.filesReviewed, 'file') + ' reviewed')
+  if (summary.filesReviewed !== undefined) {
+    parts.push(summary.filesChanged === undefined
+      ? plural(summary.filesReviewed, 'file') + ' reviewed'
+      : summary.filesReviewed + '/' + summary.filesChanged + ' changed ' +
+        (summary.filesChanged === 1 ? 'file' : 'files') + ' reviewed')
+  }
   if (summary.deterministicChecks !== undefined) {
     parts.push(plural(summary.deterministicChecks, 'deterministic check'))
   }
-  if (summary.coverage !== undefined) parts.push(summary.coverage + ' coverage')
+  if (summary.coverage !== undefined) {
+    parts.push(summary.coverage === 'full'
+      ? 'full applicable-oracle coverage'
+      : 'portable oracle coverage')
+  }
   return parts.length > 0 ? parts.join(' · ') : undefined
 }
 

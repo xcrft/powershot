@@ -1284,9 +1284,15 @@ check('portable coverage is a verdict, but never masquerades as full semantic co
     filesReviewed: 1, deterministicChecks: 1, scopeDetails: unavailable,
   })
   assert.match(out, /No medium-or-higher deterministic findings\./)
-  assert.match(out, /1 file reviewed · 1 deterministic check · portable coverage/)
+  assert.match(out, /1 file reviewed · 1 deterministic check · portable oracle coverage/)
   assert.match(out, /1 reviewed file lacked type information and a reference graph/)
   assert.doesNotMatch(out, /not a verdict/)
+
+  const full = terminal([], {
+    subtitle: 'workspace', verified: 0, judged: 0, state: 'complete', notLookedAt: [],
+    coverage: 'full', filesReviewed: 2, filesChanged: 2, deterministicChecks: 3,
+  })
+  assert.match(full, /2\/2 changed files reviewed · 3 deterministic checks · full applicable-oracle coverage/)
 
   const selected = Array.from({ length: 20 }, (_, index) => ({
     path: 'web/file-' + index + '.ts',
@@ -1312,7 +1318,7 @@ check('portable coverage is a verdict, but never masquerades as full semantic co
     },
   }))
   assert.match(md, /✅ \*\*No medium-or-higher deterministic findings\*\*/)
-  assert.match(md, /20 files reviewed · 19 deterministic checks · portable coverage/)
+  assert.match(md, /20\/36 changed files reviewed · 19 deterministic checks · portable oracle coverage/)
   assert.match(md, /Model review was disabled \(`verify-only`\)\./)
   assert.match(md, /<summary>Coverage details<\/summary>/)
   const rendered = md.replace(/\\/g, '')
@@ -2132,6 +2138,16 @@ check('the public action persists judge answers and publishes only a verdict', (
   assert.match(action, /m\.coverage === "full" \|\| m\.coverage === "portable" \? m\.coverage : "unknown"/)
   assert.match(action, /Approve a clean review[\s\S]+steps\.review\.outputs\.coverage == 'full'/)
 })
+check('the public action keeps every pull request write inside the base repository', () => {
+  const action = readFileSync(join(process.cwd(), 'action.yml'), 'utf8')
+  for (const name of ['Post inline comments', 'Comment on the pull request', 'Approve a clean review']) {
+    const start = action.indexOf('    - name: ' + name)
+    const end = action.indexOf('\n    - name: ', start + 1)
+    const step = action.slice(start, end === -1 ? undefined : end)
+    assert.ok(start >= 0, name + ' step is missing')
+    assert.match(step, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/, name)
+  }
+})
 check('published CI examples preserve one verdict and its exit status', () => {
   const action = readFileSync(join(process.cwd(), 'examples', 'github-actions', 'action.yml'), 'utf8')
   const github = readFileSync(join(process.cwd(), 'examples', 'github-actions', 'cli.yml'), 'utf8')
@@ -2171,10 +2187,11 @@ check('the viewer labels a complete portable session', () => {
   const html = viewer([], {
     id: 'portable', target: 'workspace', started: '2026-01-01T10:00:00Z',
     state: 'complete', notLookedAt: [], coverage: 'portable',
-    verifyOnly: true, minSeverity: 'medium', filesReviewed: 1, deterministicChecks: 2,
+    verifyOnly: true, minSeverity: 'medium', filesReviewed: 1, filesChanged: 3,
+    deterministicChecks: 2,
     scopeDetails: ['1 reviewed file lacked type information'],
   })
-  assert.match(html, /1 file reviewed · 2 deterministic checks · portable coverage/)
+  assert.match(html, /1\/3 changed files reviewed · 2 deterministic checks · portable oracle coverage/)
   assert.match(html, /No medium-or-higher deterministic findings\./)
   assert.match(html, /<summary>Coverage details<\/summary>/)
 })
@@ -2365,6 +2382,17 @@ check('a finding is matched past a line that moved under it', () => {
   // code above it grew, so the same defect now sits ten lines lower — not a new one
   assert.equal(Session.compare(at(12), at(22)).introduced.length, 0)
   assert.equal(Session.compare(at(12), at(22)).remaining.length, 1)
+  rmSync(dir, { recursive: true, force: true })
+})
+check('a finished session preserves the reviewed and changed file counts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'psh-scope-session-'))
+  const session = Session.create(dir, 'workspace')
+  session.saveReport([], {
+    state: 'complete', notLookedAt: [], filesReviewed: 2, filesChanged: 5,
+  })
+  const reopened = Session.open(dir, session.id)
+  assert.equal(reopened?.report?.filesReviewed, 2)
+  assert.equal(reopened?.report?.filesChanged, 5)
   rmSync(dir, { recursive: true, force: true })
 })
 check('partial sessions cannot be compared or rendered as clean', () => {

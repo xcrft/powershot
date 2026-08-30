@@ -180,8 +180,8 @@ commands.
 flowchart LR
     START["Selected files and checks"] --> ACCOUNT{"Required work accounted for?"}
     ACCOUNT -- "yes" --> DEPTH{"Enriched semantic depth available?"}
-    DEPTH -- "yes" --> FULL["full coverage"]
-    DEPTH -- "no · portable policy" --> PORTABLE["portable coverage · gaps named"]
+    DEPTH -- "yes" --> FULL["full applicable-oracle coverage"]
+    DEPTH -- "no · portable policy" --> PORTABLE["portable oracle coverage · gaps named"]
     FULL --> FINDINGS{"Findings?"}
     PORTABLE --> FINDINGS
     FINDINGS -- "no" --> CLEAN["exit 0 · complete and clean"]
@@ -206,11 +206,11 @@ flowchart LR
 | `2` | Command or Git input was invalid |
 | `3` | Review is incomplete; findings may be missing |
 
-A clean report names its effective severity threshold, deterministic/model mode, file
-and check counts, and coverage level. A partial or failed review instead says it is not
-a verdict and keeps the missing work visible. Use `--format manifest` to inspect file
-dispositions, executed and unavailable checks, failures, judge units, and
-`notLookedAt`.
+A clean report names its effective severity threshold, deterministic/model mode,
+reviewed/changed file ratio, check count, and oracle coverage level. A partial or
+failed review instead says it is not a verdict and keeps the missing work visible. Use
+`--format manifest` to inspect file dispositions, executed and unavailable checks,
+failures, judge units, and `notLookedAt`.
 
 ## CI integration
 

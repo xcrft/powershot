@@ -90,10 +90,15 @@ newest unmarked legacy `## PowerShot` summary from v1.1.2 or older without claim
 ambiguous legacy comment through `PATCH`.
 
 The comment leads with the verdict, effective severity threshold, review mode, and
-aggregate file/check counts. Portable gaps and files outside parser coverage stay
-visible under a collapsed coverage section without filling the timeline with paths.
-The generated `powershot.manifest.json` keeps the per-file accounting for workflows
-that want to persist it as an artifact.
+reviewed/changed file ratio and check count. Portable gaps and files outside parser
+coverage stay visible under a collapsed coverage section without filling the timeline
+with paths. The generated `powershot.manifest.json` keeps the per-file accounting for
+workflows that want to persist it as an artifact.
+
+For a `pull_request` from a fork, GitHub gives the workflow token read-only pull-request
+permissions. PowerShot still runs and writes the complete report to the job summary,
+but skips summary comments, inline comments, and approval because those operations
+require a write-capable token.
 
 PowerShot checks the target head throughout reconciliation and removes its own
 just-created candidate if it observes a changed head. Simultaneous same-head runs
