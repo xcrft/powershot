@@ -36,7 +36,7 @@ import { dirname, join, sep } from 'node:path'
 import { runTool } from './judges/tools.js'
 import { codeQuality } from './report/codequality.js'
 import { viewer } from './report/viewer.js'
-import { absorbDelegated, delegateBrief } from './delegate.js'
+import { absorbDelegated, buildDelegateTask, delegateBrief } from './delegate.js'
 import { TARGETS, findTarget } from './agents.js'
 import { PACKS, packFor, parseIsolated } from './lang/packs.js'
 import { isPhantom, pythonManifest, localModules } from './lang/python-deps.js'
@@ -2227,9 +2227,16 @@ check('delegate --checks selects only the requested judging brief', () => {
     provider: 'anthropic' as const, model: 'm', verifiers: ['*'], judges: ['*'],
     minSeverity: 'low' as const, ignore: [], coverage: 'portable' as const, promptCache: true,
   }
-  const brief = delegateBrief(ground([{ path: 'a.ts', after: 'export const a = 1\n' }]), cfg, {
-    checks: ['intent'], intent: 'add a',
-  })
+  const task = buildDelegateTask(
+    ground([{ path: 'a.ts', after: 'export const a = 1\n' }]),
+    cfg,
+    [{
+      path: 'a.ts', disposition: 'selected', bytes: 19, addedLines: 1,
+      language: 'typescript', checks: [],
+    }],
+    { checks: ['intent'], intent: 'add a' },
+  )
+  const brief = delegateBrief(task)
   assert.match(brief, /## Judge: intent/)
   assert.doesNotMatch(brief, /## Judge: plausible-logic/)
 })
@@ -3743,6 +3750,7 @@ check('CLI rejects selections that would otherwise run nothing and report clean'
     assert.equal(status(['scan', 'example.rb', '--verify-only', '--checks', 'plausible-logic', '--format', 'manifest']), 2)
     assert.equal(status(['delegate', '--checks', 'phantom-api']), 2)
     assert.equal(status(['delegate']), 0)
+    assert.equal(status(['delegate', '--format', 'manifest']), 2)
     assert.equal(existsSync(join(dir, '.powershot', 'sessions')), false, 'delegate must not create an unused session')
     assert.equal(status(['scan', 'example.rb', '--format', 'unknown']), 2)
     assert.equal(status(['scan', 'example.rb', '--report', 'unknown=report.txt']), 2)
@@ -3752,6 +3760,71 @@ check('CLI rejects selections that would otherwise run nothing and report clean'
     assert.equal(status(['scan', 'example.rb', '--absorb=', '--format', 'manifest']), 2)
     assert.equal(existsSync(join(dir, '.powershot', 'sessions')), false, 'invalid absorb must fail before session creation')
     assert.equal(status(['scan', 'example.rb', '--verify-only', '--absorb', 'empty.json', '--format', 'manifest']), 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+check('delegate JSON uses the review selection contract and names excluded files', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'psh-delegate-plan-')))
+  const cli = join(process.cwd(), 'dist', 'cli.js')
+  try {
+    execFileSync('git', ['init', '-q', '.'], { cwd: dir })
+    writeFileSync(join(dir, 'source.rs'), 'pub fn value() -> i32 { 1 }\n')
+    writeFileSync(join(dir, 'notes.md'), '# Notes\n')
+    writeFileSync(join(dir, 'large.ts'), 'x'.repeat(512 * 1024 + 1))
+
+    const raw = execFileSync(process.execPath, [cli, 'delegate', '--format', 'json'], {
+      cwd: dir,
+      env: { ...process.env, CI: 'true' },
+      encoding: 'utf8',
+      maxBuffer: 2 * 1024 * 1024,
+    })
+    const task = JSON.parse(raw) as {
+      schema: string
+      state: string
+      files: { path: string; disposition: string; reason?: string }[]
+      judges: { name: string; applicable: boolean }[]
+      units: { name: string; files: string[]; changes: string }[]
+    }
+    const files = new Map(task.files.map((file) => [file.path, file]))
+
+    assert.equal(task.schema, 'powershot.delegate/v1')
+    assert.equal(task.state, 'complete')
+    assert.equal(files.get('source.rs')?.disposition, 'selected')
+    assert.equal(files.get('notes.md')?.disposition, 'waived')
+    assert.match(files.get('notes.md')?.reason ?? '', /no parser/)
+    assert.equal(files.get('large.ts')?.disposition, 'waived')
+    assert.match(files.get('large.ts')?.reason ?? '', /over 512KB/)
+    assert.ok(task.judges.some((judge) => judge.name === 'plausible-logic' && judge.applicable))
+    assert.deepEqual([...new Set(task.units.flatMap((unit) => unit.files))], ['source.rs'])
+    assert.match(task.units[0]?.changes ?? '', /pub fn value/)
+
+    const markdown = execFileSync(process.execPath, [cli, 'delegate'], {
+      cwd: dir,
+      env: { ...process.env, CI: 'true' },
+      encoding: 'utf8',
+      maxBuffer: 2 * 1024 * 1024,
+    })
+    assert.match(markdown, /## Scope/)
+    assert.match(markdown, /source\.rs.*selected/)
+    assert.match(markdown, /notes\.md.*no parser/)
+    assert.match(markdown, /large\.ts.*over 512KB/)
+    assert.ok(markdown.length < 100_000, 'an oversized source leaked into the delegate brief')
+    assert.equal(existsSync(join(dir, '.powershot', 'sessions')), false, 'delegate must stay LLM-free')
+
+    rmSync(join(dir, 'source.rs'))
+    rmSync(join(dir, 'large.ts'))
+    const waivedOnly = JSON.parse(execFileSync(
+      process.execPath,
+      [cli, 'delegate', '--format', 'json'],
+      { cwd: dir, env: { ...process.env, CI: 'true' }, encoding: 'utf8' },
+    )) as { state: string; files: { path: string; disposition: string }[]; units: unknown[] }
+    assert.equal(waivedOnly.state, 'complete')
+    assert.deepEqual(waivedOnly.files, [{
+      path: 'notes.md', disposition: 'waived', bytes: 8, addedLines: 2, language: 'other',
+      reason: 'no parser for this language',
+    }])
+    assert.deepEqual(waivedOnly.units, [])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

@@ -121,6 +121,14 @@ A branch or commit review reads source from the target revision, not from whatev
 currently present in the working directory. Grounding, verification, bundling, and
 positioning all receive the same tree.
 
+### Delegation shares file selection
+
+`psh delegate` builds the same target snapshot, `SelectionPlan`, and parser ground as
+`psh review`, then stops before deterministic verification, model calls, sessions, or
+manifests. Its Markdown brief and `powershot.delegate/v1` JSON are renderings of one
+task object. Both therefore expose the same selected, waived, and failed files and the
+same bounded judge units; an output adapter cannot silently choose a different scope.
+
 ### Capabilities belong to files
 
 A run can contain a typed TypeScript file beside a Python file or a TypeScript file

@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { Budget, parseLimits, type Limits } from '#app/budget.js'
 import { loadConfig, policyChanged } from '#app/config.js'
-import { absorbDelegated, delegateBrief } from '#app/delegate.js'
+import { absorbDelegated, buildDelegateTask, delegateBrief, delegateJson } from '#app/delegate.js'
 import { baseRefOf, checkRange, headSha, repoRoot, shaOf } from '#app/git.js'
 import { JUDGES } from '#app/judges/prompts.js'
 import { RunManifest, coverageProblems, hashOf, writeManifest } from '#app/manifest.js'
@@ -13,6 +13,7 @@ import { progress, stage } from '#app/report/terminal.js'
 import { summarizeRun } from '#app/report/summary.js'
 import { review } from '#app/review.js'
 import { scanPaths } from '#app/scan.js'
+import { SelectionPlan } from '#app/plan.js'
 import { Session } from '#app/session.js'
 import { withTargetTree } from '#app/snapshot.js'
 import { SEVERITIES, type Severity } from '#app/types.js'
@@ -42,6 +43,10 @@ export async function runReviewCommand(
 ): Promise<number> {
   if (!isReportFormat(values.format)) {
     process.stderr.write('--format must be one of: ' + REPORT_FORMATS.join(', ') + '\n')
+    return 2
+  }
+  if (command === 'delegate' && !['text', 'markdown', 'json'].includes(values.format)) {
+    process.stderr.write('delegate --format must be one of: text, markdown, json\n')
     return 2
   }
   if ((values.from && !values.to) || (values.to && !values.from)) {
@@ -167,19 +172,31 @@ export async function runReviewCommand(
   if (command === 'delegate') {
     const { buildGround } = await import('#app/ground.js')
     const { collectChanges, statedIntent } = await import('#app/git.js')
-    const { matchesAny } = await import('#app/config.js')
-    const changes = collectChanges(root, range).filter((change) => !matchesAny(change.path, config.ignore))
-    if (changes.length === 0) {
+    const all = collectChanges(root, range)
+    if (all.length === 0) {
       process.stderr.write('Nothing to review.\n')
       return 0
     }
-    const ground = await withTargetTree(root, range, (tree) => buildGround(tree, changes))
-    process.stdout.write(delegateBrief(ground, config, {
-      intent: statedIntent(root, range),
-      maxBundleLines: maxBundle,
-      checks: requestedChecks,
-    }))
-    return 0
+    const task = await withTargetTree(root, range, async (tree) => {
+      const plan = SelectionPlan.build(tree, all, config)
+      const selected = plan.keep(all)
+      const ground = await buildGround(tree, selected, undefined, all)
+      plan.accountForGround(selected, ground)
+      return buildDelegateTask(ground, config, plan.items(), {
+        intent: statedIntent(root, range),
+        maxBundleLines: maxBundle,
+        checks: requestedChecks,
+        target: { from: values.from, to: values.to, commit: values.commit },
+      })
+    })
+    const rendered = values.format === 'json' ? delegateJson(task) : delegateBrief(task)
+    if (values.output !== undefined) {
+      writeFileSync(values.output, rendered)
+      process.stderr.write(dim(' written to ' + values.output) + '\n')
+    } else {
+      process.stdout.write(rendered)
+    }
+    return task.state === 'failed' ? 3 : 0
   }
 
   const canceller = new AbortController()
