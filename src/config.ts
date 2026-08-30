@@ -4,7 +4,7 @@ import { git } from './git.js'
 import { SEVERITIES, type Severity } from './types.js'
 
 export type Config = {
-  provider: 'anthropic' | 'openai' | 'gemini'
+  provider: 'anthropic' | 'openai' | 'gemini' | 'glm'
   model: string
   verifiers: string[] // check names, or ['*']
   judges: string[]
@@ -50,7 +50,7 @@ export function policyChanged(root: string, baseRef: string): boolean {
 }
 
 const KEYS = new Set([...Object.keys(DEFAULTS), 'checks'])
-const PROVIDERS = new Set(['anthropic', 'openai', 'gemini'])
+const PROVIDERS = new Set(['anthropic', 'openai', 'gemini', 'glm'])
 const COVERAGE = new Set(['portable', 'strict'])
 
 /** A misspelled name in the config is the quietest way to get a clean review. */

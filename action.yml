@@ -11,7 +11,10 @@ inputs:
     description: Deterministic checks only — no model, no tokens, no API key
     default: 'true'
   anthropic-api-key:
-    description: Set to also run the judges. Leave empty to stay deterministic.
+    description: Anthropic key used when the configured provider is anthropic
+    default: ''
+  ai-api-key:
+    description: Z.AI key exposed as AI_API_KEY when the configured provider is glm
     default: ''
   min-severity:
     description: info | low | medium | high | critical
@@ -84,6 +87,7 @@ runs:
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        AI_API_KEY: ${{ inputs.ai-api-key }}
         PSH: ${{ github.action_path }}/dist/cli.js
         VERIFY_ONLY: ${{ inputs.verify-only }}
         MIN_SEVERITY: ${{ inputs.min-severity }}

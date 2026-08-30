@@ -95,18 +95,20 @@ async function post(url: string, init: RequestInit, provider: string): Promise<R
 }
 
 /**
- * One request, no SDK. Both providers speak JSON over HTTPS and we need exactly
- * one call shape, so a dependency would buy nothing.
+ * One request, no SDK. The providers speak JSON over HTTPS and each needs only one
+ * bounded call shape, so a dependency would buy nothing.
  */
 export async function complete(cfg: Config, msg: Msg, maxTokens = 2000, tools?: ToolRunner): Promise<Completion> {
   if (cfg.provider === 'openai') return openai(cfg, msg, maxTokens)
   if (cfg.provider === 'gemini') return gemini(cfg, msg, maxTokens)
+  if (cfg.provider === 'glm') return glm(cfg, msg, maxTokens)
   return anthropic(cfg, msg, maxTokens, tools)
 }
 
 export function apiKey(cfg: Config): string | undefined {
   if (cfg.provider === 'openai') return process.env.OPENAI_API_KEY
   if (cfg.provider === 'gemini') return process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY
+  if (cfg.provider === 'glm') return process.env.AI_API_KEY
   return process.env.ANTHROPIC_API_KEY
 }
 
@@ -212,6 +214,58 @@ async function openai(cfg: Config, msg: Msg, maxTokens: number): Promise<Complet
   const json: any = await res.json()
   return {
     text: json.choices?.[0]?.message?.content ?? '',
+    usage: {
+      requests: 1,
+      inputTokens: Number(json.usage?.prompt_tokens ?? 0),
+      outputTokens: Number(json.usage?.completion_tokens ?? 0),
+      toolCalls: 0,
+    },
+  }
+}
+
+/**
+ * GLM exposes an OpenAI-compatible chat-completions surface. Keep its credential and
+ * endpoint separate from the OpenAI provider so selecting GLM cannot accidentally
+ * send one vendor's key to another vendor's host.
+ */
+async function glm(cfg: Config, msg: Msg, maxTokens: number): Promise<Completion> {
+  const key = process.env.AI_API_KEY
+  if (!key) throw new ProviderError('configuration', 'GLM', 'AI_API_KEY is not set')
+  const body: Record<string, unknown> = {
+    model: cfg.model,
+    max_tokens: maxTokens,
+    temperature: 0,
+    stream: false,
+    messages: [
+      { role: 'system', content: msg.system },
+      { role: 'user', content: msg.user },
+    ],
+  }
+  if (/^glm-5\.3(?:-|$)/.test(cfg.model)) {
+    body.thinking = { type: 'enabled' }
+    body.reasoning_effort = 'max'
+  }
+  const res = await post(
+    endpoint(process.env.AI_BASE_URL, 'https://api.z.ai/api/paas/v4', '/chat/completions'),
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'accept-language': 'en-US,en',
+        authorization: 'Bearer ' + key,
+      },
+      body: JSON.stringify(body),
+    },
+    'GLM',
+  )
+  if (!res.ok) throw classify(res.status, await res.text(), 'GLM')
+  const json: any = await res.json()
+  const text = json.choices?.[0]?.message?.content
+  if (typeof text !== 'string' || text.trim().length === 0) {
+    throw new ProviderError('bad_response', 'GLM', 'returned no assistant content', true)
+  }
+  return {
+    text,
     usage: {
       requests: 1,
       inputTokens: Number(json.usage?.prompt_tokens ?? 0),
