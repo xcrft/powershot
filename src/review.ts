@@ -15,7 +15,6 @@ import { enabled, type Config } from './config.js'
 import { SelectionPlan, capabilitiesOf } from './plan.js'
 import { Budget, type Usage } from './budget.js'
 import type { RunManifest } from './manifest.js'
-import { packFor } from './lang/packs.js'
 import { SEVERITIES, type ChangedFile, type Finding, type Severity } from './types.js'
 import { lines as splitLines, stripControl, stripPath } from './text.js'
 
@@ -238,18 +237,10 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
   // default. Strict policy makes the same promise for every configured verifier.
   const requireEnrichedOracles = config.coverage === 'strict' || opts.checks !== undefined
 
-  // a file the change touched that no parser produced a tree for was not reviewed,
-  // whatever the summary says about the ones that were
-  const grounded = new Set([...g.files.map((f) => f.changed.path), ...g.foreign.map((f) => f.path)])
-  for (const c of changed) {
-    if (c.deleted) {
-      plan.waive(c.path, 'deleted file has no current source to review')
-      continue
-    }
-    if (grounded.has(c.path)) continue
-    if (packFor(c.path)) plan.fail(c.path, 'declared language parser unavailable')
-    else plan.waive(c.path, 'no parser for this language')
-  }
+  // A file the change touched that no parser produced a tree for was not reviewed,
+  // whatever the summary says about the ones that were. Delegation uses this exact
+  // transition too, so its task cannot disagree with the review it will feed.
+  plan.accountForGround(changed, g)
   // Capabilities belong to files, not runs. A typed file beside one excluded from
   // tsconfig must not make the latter look checked, and an old Ruby file must not
   // make a new Python file eligible for a before/after oracle.

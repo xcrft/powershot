@@ -125,6 +125,29 @@ export class SelectionPlan {
     return changed.filter((c) => this.rows.get(c.path)?.disposition === 'selected')
   }
 
+  /**
+   * Finish the file-level selection after parsers have had one chance to load it.
+   *
+   * Review and delegation both promise to describe the same change. Keeping this
+   * transition on the plan prevents either caller from silently inventing its own
+   * meaning for a deleted, unsupported, or unavailable source file.
+   */
+  accountForGround(changed: ChangedFile[], ground: Ground): void {
+    const grounded = new Set([
+      ...ground.files.map((file) => file.changed.path),
+      ...ground.foreign.map((file) => file.path),
+    ])
+    for (const file of changed) {
+      if (file.deleted) {
+        this.waive(file.path, 'deleted file has no current source to review')
+        continue
+      }
+      if (grounded.has(file.path)) continue
+      if (packFor(file.path)) this.fail(file.path, 'declared language parser unavailable')
+      else this.waive(file.path, 'no parser for this language')
+    }
+  }
+
   items(): PlanItem[] {
     return [...this.rows.values()]
   }

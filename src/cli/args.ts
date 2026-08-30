@@ -36,7 +36,8 @@ psh — code review for machine-written code
   psh review --from main --to feat/x  branch range
   psh review --commit <hash>          a single commit
   psh scan <path>                     audit existing files, no git history needed
-  psh delegate                        emit the judging work for an agent you already pay for
+  psh delegate [--format text|markdown|json]
+                                      emit a selection-accounted task for your existing agent
   psh session list | view <id>        runs that can be resumed, or replayed as a page
   psh session diff <a> <b>            what one review found that the other did not
   psh dismiss <id> [--reason "..."]   record that a finding is correct, and stop showing it

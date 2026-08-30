@@ -298,6 +298,20 @@ psh delegate > /tmp/powershot-brief.md
 psh review --verify-only --absorb /tmp/powershot-findings.json
 ```
 
+Delegation uses the same `SelectionPlan` and target snapshot as a real review. The
+brief names every changed file as selected, policy-waived, or failed, so unsupported
+or oversized files cannot disappear between task creation and absorption. For an
+agent that consumes structured input, request the versioned task directly:
+
+```bash
+psh delegate --format json > /tmp/powershot-task.json
+```
+
+`powershot.delegate/v1` contains the resolved file dispositions, applicable judges,
+bounded review units, changed-line excerpts, intent, and the exact output contract.
+Creating either form is LLM-free and does not create a session. Deterministic checks
+run when the returned finding array is absorbed by `psh review --verify-only`.
+
 ## Language coverage
 
 | Language | Available oracles |
