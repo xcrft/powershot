@@ -10,7 +10,7 @@ import { renderChanges } from './judges/judge.js'
 import { VERIFIERS } from './verifiers/index.js'
 import { runJudge } from './judges/judge.js'
 import { COMMON, JUDGES } from './judges/prompts.js'
-import { apiKey } from './judges/llm.js'
+import { apiKey, ProviderError } from './judges/llm.js'
 import { enabled, type Config } from './config.js'
 import { SelectionPlan, capabilitiesOf } from './plan.js'
 import { Budget, type Usage } from './budget.js'
@@ -324,9 +324,11 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
       const missed = uncovered(g, units)
       if (missed.length > 0) failures.push('not sent to any judge: ' + missed.slice(0, 5).join(', '))
 
+      let terminalProviderFailure: ProviderError | undefined
       for (const spec of wantedJudges) {
         if (cancelled) break
         for (const unit of units) {
+          const unitName = bundleName(unit, root)
           // between units, not mid-flight: `--resume` picks up exactly here
           if (opts.signal?.aborted) {
             cancelled = true
@@ -340,12 +342,12 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
             manifest?.unit({ judge: spec.name, unit: bundleName(unit, root), outcome: 'waived', reason: stop, findings: 0 })
             continue
           }
-          const label = units.length > 1 ? spec.name + ' · ' + bundleName(unit, root) : spec.name
+          const label = units.length > 1 ? spec.name + ' · ' + unitName : spec.name
           const rendered = renderChanges(unit.files)
-          const cached = opts.session?.get(spec.name, bundleName(unit, root), rendered)
+          const cached = opts.session?.get(spec.name, unitName, rendered)
           if (cached) {
             findings.push(...cached)
-            manifest?.unit({ judge: spec.name, unit: bundleName(unit, root), outcome: 'reused', reason: 'resumed from session', findings: cached.length })
+            manifest?.unit({ judge: spec.name, unit: unitName, outcome: 'reused', reason: 'resumed from session', findings: cached.length })
             say('judge     ' + label + ' → ' + cached.length + ' findings (resumed)')
             continue
           }
@@ -362,9 +364,23 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
           const remembered = judgeCache?.get(key)
           if (remembered) {
             findings.push(...remembered)
-            opts.session?.record(spec.name, bundleName(unit, root), rendered, remembered)
-            manifest?.unit({ judge: spec.name, unit: bundleName(unit, root), outcome: 'reused', reason: 'answered before, same question', findings: remembered.length })
+            opts.session?.record(spec.name, unitName, rendered, remembered)
+            manifest?.unit({ judge: spec.name, unit: unitName, outcome: 'reused', reason: 'answered before, same question', findings: remembered.length })
             say('judge     ' + label + ' → ' + remembered.length + ' findings (cached)')
+            continue
+          }
+
+          // A permanent provider failure stops new calls, but answers already in the
+          // session or cache still count: they need no provider and may contain real
+          // findings from an earlier completed run.
+          if (terminalProviderFailure) {
+            manifest?.unit({
+              judge: spec.name,
+              unit: unitName,
+              outcome: 'waived',
+              reason: terminalProviderFailure.message,
+              findings: 0,
+            })
             continue
           }
 
@@ -372,16 +388,22 @@ export async function review(opts: ReviewOptions): Promise<ReviewResult> {
           try {
             const judged = await runJudge(spec, g, config, { intent, bundle: unit, useTools: opts.tools, budget })
             findings.push(...judged)
-            opts.session?.record(spec.name, bundleName(unit, root), rendered, judged)
+            opts.session?.record(spec.name, unitName, rendered, judged)
             judgeCache?.put(key, judged, new Date().toISOString())
-            manifest?.unit({ judge: spec.name, unit: bundleName(unit, root), outcome: 'completed', findings: judged.length })
+            manifest?.unit({ judge: spec.name, unit: unitName, outcome: 'completed', findings: judged.length })
             judgeDone(label + ' → ' + judged.length + ' findings')
           } catch (e) {
             // keep what the others found, but the run is incomplete from here
-            const detail = label + ': ' + (e as Error).message
-            failures.push(detail)
-            manifest?.unit({ judge: spec.name, unit: bundleName(unit, root), outcome: 'failed', reason: (e as Error).message, findings: 0 })
-            judgeDone(label + ' failed: ' + (e as Error).message)
+            const error = e instanceof Error ? e : new Error(String(e))
+            const detail = label + ': ' + error.message
+            if (error instanceof ProviderError && !error.retryable) {
+              terminalProviderFailure = error
+              failures.push(error.message + ' — further judge calls stopped')
+            } else {
+              failures.push(detail)
+            }
+            manifest?.unit({ judge: spec.name, unit: unitName, outcome: 'failed', reason: error.message, findings: 0 })
+            judgeDone(label + ' failed: ' + error.message)
           }
         }
       }
