@@ -294,13 +294,15 @@ For GLM, select the provider and model in `powershot.config.json`:
 ```json
 {
   "provider": "glm",
-  "model": "glm-5.3"
+  "model": "glm-5.3-flash"
 }
 ```
 
 Set `GLM_API_KEY` in the surrounding environment. PowerShot uses the Z.AI general API
 by default; set inherited `AI_BASE_URL` only for another compatible regional endpoint
-or proxy. For `glm-5.3`, PowerShot enables thinking with maximum reasoning effort.
+or proxy. For the GLM 5.3 family, PowerShot uses the required thinking mode at low
+effort with an 8K output ceiling, which keeps a short review bounded while leaving
+room for the final JSON answer.
 In GitHub Actions, pass the same secret through `glm-api-key`:
 
 ```yaml

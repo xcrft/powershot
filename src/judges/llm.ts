@@ -253,9 +253,15 @@ async function openai(cfg: Config, msg: Msg, maxTokens: number): Promise<Complet
 async function glm(cfg: Config, msg: Msg, maxTokens: number): Promise<Completion> {
   const key = process.env.GLM_API_KEY
   if (!key) throw new ProviderError('configuration', 'GLM', 'GLM_API_KEY is not set')
+  const glm53 = /^glm-5\.3(?:-|$)/.test(cfg.model)
   const body: Record<string, unknown> = {
     model: cfg.model,
-    max_tokens: maxTokens,
+    // GLM-5.3 counts required reasoning against max_tokens. A 2K ceiling can be
+    // consumed entirely by reasoning_content, leaving a successful response with no
+    // assistant content. PowerShot's judges are bounded single-shot classifications,
+    // so light reasoning plus an 8K ceiling leaves room for the final JSON without
+    // turning each unit into a long-horizon agent task.
+    max_tokens: glm53 ? Math.max(maxTokens, 8192) : maxTokens,
     temperature: 0,
     stream: false,
     messages: [
@@ -263,9 +269,9 @@ async function glm(cfg: Config, msg: Msg, maxTokens: number): Promise<Completion
       { role: 'user', content: msg.user },
     ],
   }
-  if (/^glm-5\.3(?:-|$)/.test(cfg.model)) {
+  if (glm53) {
     body.thinking = { type: 'enabled' }
-    body.reasoning_effort = 'max'
+    body.reasoning_effort = 'low'
   }
   const res = await post(
     endpoint(process.env.AI_BASE_URL, 'https://api.z.ai/api/paas/v4', '/chat/completions'),
@@ -282,9 +288,21 @@ async function glm(cfg: Config, msg: Msg, maxTokens: number): Promise<Completion
   )
   if (!res.ok) throw classify(res.status, await res.text(), 'GLM')
   const json: any = await res.json()
-  const text = json.choices?.[0]?.message?.content
+  const choice = json.choices?.[0]
+  const text = choice?.message?.content
   if (typeof text !== 'string' || text.trim().length === 0) {
-    throw new ProviderError('bad_response', 'GLM', 'returned no assistant content', true)
+    const finish = typeof choice?.finish_reason === 'string' ? choice.finish_reason : 'unknown'
+    const completionTokens = Number(json.usage?.completion_tokens ?? 0)
+    const reasoningChars = typeof choice?.message?.reasoning_content === 'string'
+      ? choice.message.reasoning_content.length
+      : 0
+    throw new ProviderError(
+      'bad_response',
+      'GLM',
+      'returned no assistant content (finish_reason=' + finish +
+        ', completion_tokens=' + completionTokens + ', reasoning_chars=' + reasoningChars + ')',
+      false,
+    )
   }
   return {
     text,
