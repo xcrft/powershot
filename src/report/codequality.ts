@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { Finding, Severity } from '#app/types.js'
+import { publishableFindings } from './publication.js'
 
 function level(s: Severity): string {
   return s === 'critical' ? 'blocker' : s === 'high' ? 'major' : s === 'medium' ? 'minor' : 'info'
@@ -11,6 +12,7 @@ function level(s: Severity): string {
  * reports every finding as new on each pipeline.
  */
 export function codeQuality(findings: Finding[]): string {
+  findings = publishableFindings(findings)
   return (
     JSON.stringify(
       findings.map((f) => ({

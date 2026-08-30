@@ -89,11 +89,14 @@ never patches or retires the current head's comment. The first scoped run replac
 newest unmarked legacy `## PowerShot` summary from v1.1.2 or older without claiming the
 ambiguous legacy comment through `PATCH`.
 
-The comment leads with the verdict, effective severity threshold, review mode, and
-reviewed/changed file ratio and check count. Portable gaps and files outside parser
-coverage stay visible under a collapsed coverage section without filling the timeline
-with paths. The generated `powershot.manifest.json` keeps the per-file accounting for
-workflows that want to persist it as an artifact.
+The comment leads with actionable deterministic and `firm` agent finding counts,
+effective severity threshold, review mode, and reviewed/changed file ratio and check
+count. Tentative agent suspicions are counted as withheld but are not rendered as
+findings. Portable gaps and files outside parser coverage stay visible under a
+collapsed coverage section without filling the timeline with paths. Source links are
+pinned to the reviewed head. The generated `powershot.json` retains tentative output,
+and `powershot.manifest.json` keeps the per-file accounting for workflows that want
+to persist it as an artifact.
 
 For a `pull_request` from a fork, GitHub gives the workflow token read-only pull-request
 permissions. PowerShot still runs and writes the complete report to the job summary,
@@ -128,14 +131,16 @@ lives at [`examples/github-actions/action.yml`](../examples/github-actions/actio
 | `glm-api-key` | empty | Supply `GLM_API_KEY` when the configured provider is GLM |
 | `min-severity` | `low` | Filter findings below a severity |
 | `checks` | empty | Select comma-separated check ids |
-| `upload-sarif` | `true` | Upload a complete SARIF report to GitHub code scanning |
+| `upload-sarif` | `true` | Upload actionable findings to GitHub code scanning |
 | `comment` | `true` | Maintain a pull-request comment |
 | `inline-comments` | `false` | Post up to ten proven verified findings as one inline review |
-| `fail-on-findings` | `false` | Turn a complete finding verdict into a failed job |
-| `approve` | `false` | Approve only a complete, clean, full-coverage review |
+| `fail-on-findings` | `false` | Fail when an actionable finding is published |
+| `approve` | `false` | Approve only a complete, actionable-clean, full-coverage review |
 
-The outputs are `findings`, `complete`, and `coverage`. Gate infrastructure on
-`complete`; use `coverage == 'full'` for decisions that require semantic depth.
+The outputs are `findings`, `complete`, and `coverage`. `findings` counts the
+actionable results published to SARIF, not withheld tentative agent suspicions. Gate
+infrastructure on `complete`; use `coverage == 'full'` for decisions that require
+semantic depth.
 
 ## Direct CLI on GitHub Actions
 
@@ -168,9 +173,9 @@ same verdict.
 
 ## GitLab Code Quality
 
-The CLI's `codequality` format is accepted by GitLab's Code Quality report. Use a full
-clone or fetch both merge-request SHAs, then preserve the CLI status separately from
-the redirected report:
+The CLI's `codequality` format is accepted by GitLab's Code Quality report and
+withholds tentative agent suspicions. Use a full clone or fetch both merge-request
+SHAs, then preserve the CLI status separately from the redirected report:
 
 ```bash
 STATUS=0

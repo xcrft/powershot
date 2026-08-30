@@ -5,6 +5,7 @@ import {
   scopeLine,
   type ReviewSummary,
 } from './summary.js'
+import { publishableFindings } from './publication.js'
 
 const MARK: Record<string, string> = { verified: '▣', judged: '▚' }
 
@@ -13,6 +14,19 @@ function text(s: string): string {
   return s
     .replace(/\r?\n/g, ' ')
     .replace(/[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/g, '\\$&')
+}
+
+function plural(count: number, singular: string, pluralForm = singular + 's'): string {
+  return count + ' ' + (count === 1 ? singular : pluralForm)
+}
+
+/** Keep a PR summary scannable; the JSON report retains the complete prose. */
+function excerpt(value: string, limit: number): string {
+  const flat = value.replace(/\s+/g, ' ').trim()
+  if (flat.length <= limit) return flat
+  const boundary = flat.lastIndexOf(' ', limit)
+  const end = boundary >= Math.floor(limit * 0.7) ? boundary : limit
+  return flat.slice(0, end).trimEnd() + '…'
 }
 
 /** A path inside a code span: only a backtick or a newline can end one. */
@@ -105,25 +119,40 @@ export function markdown(findings: Finding[], run?: ReviewSummary): string {
       ]
     : []
   const summary = run ? runSummary(run) : []
+  const publishable = publishableFindings(findings)
+  const withheld = findings.length - publishable.length
 
-  if (findings.length === 0) {
+  if (publishable.length === 0) {
     return [
       '## PowerShot', '', ...banner,
       incomplete
         ? 'No findings *from what it managed to review*.'
-        : run ? '✅ **' + noFindingsLabel(run) + '**' : 'No findings.',
+        : withheld > 0
+          ? '✅ **No actionable findings**'
+          : run ? '✅ **' + noFindingsLabel(run) + '**' : 'No findings.',
+      '',
+      ...(withheld > 0
+        ? [plural(withheld, 'tentative agent suspicion') + ' withheld from this summary.', '']
+        : []),
       '', ...summary,
     ].join('\n')
   }
 
-  const verified = findings.filter((f) => f.class === 'verified').length
-  const judged = findings.length - verified
+  const verified = publishable.filter((f) => f.class === 'verified').length
+  const judged = publishable.length - verified
 
   const out: string[] = ['## PowerShot', '', ...banner]
-  out.push('**' + verified + ' verified** (deterministic, 0 tokens) · **' + judged + ' judged** (agent)', '')
+  out.push(
+    '**' + plural(verified, 'deterministic finding') + '** · **' +
+      plural(judged, 'actionable agent finding') + '**',
+    '',
+  )
+  if (withheld > 0) {
+    out.push(plural(withheld, 'tentative agent suspicion') + ' withheld from this summary.', '')
+  }
   out.push(...summary)
 
-  for (const [file, list] of group(findings)) {
+  for (const [file, list] of group(publishable)) {
     out.push('### `' + path(file) + '`', '')
     for (const f of list) {
       out.push(
@@ -144,20 +173,24 @@ export function markdown(findings: Finding[], run?: ReviewSummary): string {
           f.line +
           ')',
       )
-      out.push('', text(f.title), '')
+      out.push('', text(excerpt(f.title, 220)), '')
       if (f.frame) {
         const fence = fenceFor(f.frame.lines, languageFor(file))
         out.push(fence.open, ...f.frame.lines, fence.close, '')
       }
-      if (f.evidence) out.push('> _' + text(f.evidence.oracle) + '_: ' + text(f.evidence.detail), '')
+      if (f.evidence) {
+        const source = f.evidence.oracle === 'agent'
+          ? ''
+          : ' (' + text(excerpt(f.evidence.oracle, 80)) + ')'
+        out.push('> **Why' + source + ':** ' + text(excerpt(f.evidence.detail, 520)), '')
+      }
       if (f.suggestion !== undefined) {
         // GitHub and GitLab both render this as a one-click "apply", so a finding the
         // checker knows the answer to becomes a fix rather than an instruction
         const fence = fenceFor([f.suggestion], 'suggestion')
         out.push(fence.open, f.suggestion, fence.close, '')
       } else if (f.fix) {
-        const fence = fenceFor([f.fix])
-        out.push(fence.open, f.fix, fence.close, '')
+        out.push('> **Fix:** ' + text(excerpt(f.fix, 320)), '')
       }
     }
   }
